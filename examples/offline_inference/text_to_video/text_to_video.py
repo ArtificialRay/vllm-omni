@@ -5,6 +5,7 @@ import argparse
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -178,13 +179,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable diffusion pipeline profiler to display stage durations.",
     )
-    parser.add_argument(
-        "--quantization",
-        type=str,
-        default=None,
-        choices=["fp8", "gguf"],
-        help="Quantization method for the transformer (fp8 for online FP8 quantization).",
-    )
     return parser.parse_args()
 
 
@@ -227,7 +221,18 @@ def main():
     # Check if profiling is requested via environment variable
     profiler_enabled = bool(os.getenv("VLLM_TORCH_PROFILER_DIR"))
 
-    omni_kwargs = dict(
+    # Build quantization kwargs
+    quant_kwargs: dict[str, Any] = {}
+    ignored_layers = [s.strip() for s in args.ignored_layers.split(",") if s.strip()] if args.ignored_layers else None
+    if args.quantization and ignored_layers:
+        quant_kwargs["quantization_config"] = {
+            "method": args.quantization,
+            "ignored_layers": ignored_layers,
+        }
+    elif args.quantization:
+        quant_kwargs["quantization"] = args.quantization
+
+    omni_kwargs: dict[str, Any] = dict(
         model=args.model,
         enable_layerwise_offload=args.enable_layerwise_offload,
         vae_use_slicing=args.vae_use_slicing,
@@ -236,16 +241,13 @@ def main():
         parallel_config=parallel_config,
         enforce_eager=args.enforce_eager,
         model_class_name=model_class_name,
-        cache_backend=args.cache_backend,
-        cache_config=cache_config,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
+        **quant_kwargs,
     )
     if args.boundary_ratio is not None:
         omni_kwargs["boundary_ratio"] = args.boundary_ratio
     if args.flow_shift is not None:
         omni_kwargs["flow_shift"] = args.flow_shift
-    if args.quantization is not None:
-        omni_kwargs["quantization"] = args.quantization
     if args.cache_backend is not None:
         omni_kwargs["cache_backend"] = args.cache_backend
         omni_kwargs["cache_config"] = cache_config
@@ -268,6 +270,9 @@ def main():
         f" cfg_parallel_size={args.cfg_parallel_size}, tensor_parallel_size={args.tensor_parallel_size},"
         f" vae_patch_parallel_size={args.vae_patch_parallel_size}, enable_expert_parallel={args.enable_expert_parallel}"
     )
+    print(f"  Quantization: {args.quantization if args.quantization else 'None (BF16)'}")
+    if ignored_layers:
+        print(f"  Ignored layers: {ignored_layers}")
     print(f"  Video size: {args.width}x{args.height}")
     print(f"{'=' * 60}\n")
 
