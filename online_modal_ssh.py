@@ -14,7 +14,7 @@ import os
 ssh_key_path = os.path.expanduser("~/.ssh/id_rsa.pub")
 
 image = (
-    modal.Image.from_registry("vllm/vllm-openai:v0.19.0")
+    modal.Image.from_registry("vllm/vllm-openai:v0.19.0", add_python="3.12")
     .apt_install(
         "git", "sox", "libsox-fmt-all", "jq",
         "openssh-server", "curl", "pkg-config", "build-essential",
@@ -30,7 +30,7 @@ image = (
         "echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config",
         "echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config",
     )
-    .run_commands("git clone https://github.com/vllm-project/vllm-omni.git /vllm-omni")
+    .run_commands("git clone https://github.com/ArtificialRay/vllm-omni.git /vllm-omni")
     .run_commands("cd /vllm-omni && uv pip install --system -e '.[dev]'")
 )
 
