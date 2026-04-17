@@ -8,7 +8,7 @@ image = (
     .apt_install("wget", "git", "sox", "libsox-fmt-all", "jq", "curl")
     .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh")
     .env({"PATH": "/root/.local/bin:$PATH"})
-    .run_commands("uv pip install --system vllm==0.19.0 --torch-backend=auto")
+    .run_commands("uv pip install --system vllm==0.19.0 --torch-backend cu124")
     .run_commands("git clone https://github.com/ArtificialRay/vllm-omni.git /vllm-omni")
     .run_commands("cd /vllm-omni && uv pip install --system -e .")
 )

@@ -14,10 +14,11 @@ import os
 ssh_key_path = os.path.expanduser("~/.ssh/id_rsa.pub")
 
 image = (
-    modal.Image.from_registry("vllm/vllm-openai:v0.19.0", add_python="3.12")
+    modal.Image.from_registry("nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04", add_python="3.12")
+    .env({"DEBIAN_FRONTEND": "noninteractive", "TZ": "UTC"})
     .apt_install(
-        "git", "sox", "libsox-fmt-all", "jq",
-        "openssh-server", "curl", "pkg-config", "build-essential",
+        "wget", "git", "sox", "libsox-fmt-all", "jq", "curl",
+        "openssh-server", "pkg-config", "build-essential",
     )
     .run_commands(
         "mkdir -p /run/sshd",
@@ -30,6 +31,9 @@ image = (
         "echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config",
         "echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config",
     )
+    .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh")
+    .env({"PATH": "/root/.local/bin:$PATH"})
+    .run_commands("uv pip install --system vllm==0.19.0 --torch-backend cu130")
     .run_commands("git clone https://github.com/ArtificialRay/vllm-omni.git /vllm-omni")
     .run_commands("cd /vllm-omni && uv pip install --system -e '.[dev]'")
 )
