@@ -14,6 +14,7 @@ python image_to_video.py \
   --num-inference-steps 40 \
   --flow-shift 12.0 \
   --fps 16 \
+  --quantization "fp8" \
   --output i2v_output.mp4
 
 # TI2V with Wan-AI/Wan2.2-TI2V-5B-Diffusers
