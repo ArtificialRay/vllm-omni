@@ -28,7 +28,6 @@ from vllm_omni.diffusion.models.wan2_2.scheduling_wan_euler import WanEulerSched
 from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import WanTransformer3DModel
 from vllm_omni.diffusion.postprocess import interpolate_video_tensor
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
-from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.platforms import current_omni_platform
@@ -338,8 +337,9 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
             model, subfolder="vae", torch_dtype=dtype, local_files_only=local_files_only
         ).to(self.device)
 
-        # Get vLLM quantization config for linear layers
-        quant_config = get_vllm_quant_config_for_layers(od_config.quantization_config)
+        quant_config = od_config.quantization_config
+        if quant_config is not None:
+            logger.info("Enabling quantization for Wan 2.2 transformer: %s", quant_config)
 
         # Initialize transformers with correct config (weights loaded via load_weights)
         if load_transformer:

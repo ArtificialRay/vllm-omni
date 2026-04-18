@@ -36,6 +36,10 @@ image = (
     .run_commands("uv pip install --system vllm==0.19.0 --torch-backend cu130")
     .run_commands("git clone https://github.com/ArtificialRay/vllm-omni.git /vllm-omni")
     .run_commands("cd /vllm-omni && uv pip install --system -e '.[dev]'")
+    .run_commands(
+        "uv pip uninstall --system opencv-python || true",
+        "uv pip install --system --reinstall opencv-python-headless",
+    )
 )
 
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)

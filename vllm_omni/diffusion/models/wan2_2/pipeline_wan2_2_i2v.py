@@ -34,7 +34,6 @@ from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import (
 )
 from vllm_omni.diffusion.postprocess import interpolate_video_tensor
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
-from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.platforms import current_omni_platform
@@ -237,8 +236,7 @@ class Wan22I2VPipeline(
             model, subfolder="vae", torch_dtype=dtype, local_files_only=local_files_only
         ).to(self.device)
 
-        # Get vLLM quantization config for linear layers
-        quant_config = get_vllm_quant_config_for_layers(od_config.quantization_config)
+        quant_config = od_config.quantization_config
 
         # Transformers (weights loaded via load_weights)
         # Load config from model directory or HF Hub to get correct in_channels for I2V models
