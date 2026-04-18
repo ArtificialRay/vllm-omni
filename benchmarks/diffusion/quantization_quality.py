@@ -228,8 +228,13 @@ def _generate_video(omni, args, prompt, seed, image=None):
         video = frames.detach().cpu()
         if video.dim() == 5:
             video = video[0].permute(1, 2, 3, 0) if video.shape[1] in (3, 4) else video[0]
-        elif video.dim() == 4 and video.shape[0] in (3, 4):
-            video = video.permute(1, 2, 3, 0)
+        if video.dim() == 4:
+            print(f"video frames has shape:{video.shape}")
+            if video.shape[0] in (3, 4):  # (C, F, H, W)
+                video = video.permute(1, 2, 3, 0)
+            elif video.shape[1] in (3, 4):  # (F, C, H, W)
+                video = video.permute(0, 2, 3, 1)
+            # else: already (F, H, W, C)
         if video.is_floating_point():
             video = video.clamp(-1, 1) * 0.5 + 0.5
         frames_array = video.float().numpy()
