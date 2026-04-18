@@ -1,6 +1,6 @@
 
 cd /vllm-omni/examples/offline_inference/image_to_video
-
+wget https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/cherry_blossom.jpg
 # TI2V with Wan-AI/Wan2.2-TI2V-5B-Diffusers
 python image_to_video.py \
   --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \

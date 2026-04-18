@@ -681,7 +681,7 @@ class WanTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config)
-        self.norm3 = FP32LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
 
         # Scale-shift table for modulation
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
