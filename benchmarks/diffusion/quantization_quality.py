@@ -223,7 +223,7 @@ def _generate_video(omni, args, prompt, seed, image=None):
         frames = first.images
     else:
         raise ValueError("Could not extract video frames from output.")
-
+    print(f"Generated video frames type: {type(frames)}, shape: {getattr(frames, 'shape', 'N/A')}")
     if isinstance(frames, torch.Tensor):
         video = frames.detach().cpu()
         if video.dim() == 5:
