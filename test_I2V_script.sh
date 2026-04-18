@@ -1,6 +1,6 @@
 
 cd /vllm-omni/examples/offline_inference/image_to_video
-wget https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/cherry_blossom.jpg
+# wget https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/cherry_blossom.jpg
 # TI2V with Wan-AI/Wan2.2-TI2V-5B-Diffusers
 python image_to_video.py \
   --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \
@@ -15,7 +15,21 @@ python image_to_video.py \
   --flow-shift 12.0 \
   --fps 16 \
   --quantization "fp8" \
-  --output i2v_output.mp4
+  --output i2v_output_fp8.mp4
+# TI2V quality comparison at bf16 precision
+python image_to_video.py \
+  --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \
+  --image cherry_blossom.jpg \
+  --prompt "Cherry blossoms swaying gently in the breeze, petals falling, smooth motion" \
+  --negative-prompt "<optional quality filter>" \
+  --height 480 \
+  --width 832 \
+  --num-frames 48 \
+  --guidance-scale 4.0 \
+  --num-inference-steps 40 \
+  --flow-shift 12.0 \
+  --fps 16 \
+  --output i2v_output_bf16.mp4
 
 # TI2V with Wan-AI/Wan2.2-TI2V-5B-Diffusers
 # python image_to_video.py \

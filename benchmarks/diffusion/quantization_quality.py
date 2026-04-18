@@ -34,6 +34,17 @@ Video example (text-to-video):
         --height 720 --width 1280 \
         --num-frames 81 --num-inference-steps 40 --seed 42
 
+Image-to-video example (i2v / ti2v):
+    python benchmarks/diffusion/quantization_quality.py \
+        --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
+        --task i2v \
+        --image input.jpg \
+        --quantization fp8 \
+        --prompts \
+            "Cherry blossoms swaying gently in the breeze" \
+        --height 480 --width 832 \
+        --num-frames 81 --num-inference-steps 40 --seed 42
+
 Multiple quantization methods:
     python benchmarks/diffusion/quantization_quality.py \
         --model Tongyi-MAI/Z-Image-Turbo \
@@ -171,17 +182,24 @@ def _generate_image(omni, args, prompt, seed):
     return img, elapsed, peak_mem
 
 
-def _generate_video(omni, args, prompt, seed):
-    """Generate a video and return (np.ndarray [F,H,W,C], time_seconds, memory_gib)."""
+def _generate_video(omni, args, prompt, seed, image=None):
+    """Generate a video and return (np.ndarray [F,H,W,C], time_seconds, memory_gib).
+
+    Pass ``image`` (PIL.Image) for i2v / ti2v tasks.
+    """
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
     from vllm_omni.outputs import OmniRequestOutput
     from vllm_omni.platforms import current_omni_platform
+
+    request = {"prompt": prompt, "negative_prompt": ""}
+    if image is not None:
+        request["multi_modal_data"] = {"image": image}
 
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(seed)
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     outputs = omni.generate(
-        {"prompt": prompt, "negative_prompt": ""},
+        request,
         OmniDiffusionSamplingParams(
             height=args.height,
             width=args.width,
@@ -238,9 +256,18 @@ def run_benchmark(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    is_video = args.task == "t2v"
+    is_video = args.task in ("t2v", "i2v", "ti2v")
+    is_image_conditioned = args.task in ("i2v", "ti2v")
     prompts = args.prompts
     seed = args.seed
+
+    input_image = None
+    if is_image_conditioned:
+        if not args.image:
+            raise ValueError("--image is required for i2v and ti2v tasks.")
+        import PIL.Image
+        input_image = PIL.Image.open(args.image).convert("RGB")
+        input_image = input_image.resize((args.width, args.height), PIL.Image.Resampling.LANCZOS)
 
     # Determine configs to benchmark
     configs = []  # list of (label, quantization_method)
@@ -258,7 +285,7 @@ def run_benchmark(args):
     for prompt in prompts:
         print(f"  Generating: {prompt[:60]}...")
         if is_video:
-            out, t, mem = _generate_video(omni_bl, args, prompt, seed)
+            out, t, mem = _generate_video(omni_bl, args, prompt, seed, image=input_image)
         else:
             out, t, mem = _generate_image(omni_bl, args, prompt, seed)
         baseline_outputs[prompt] = (out, t, mem)
@@ -298,7 +325,7 @@ def run_benchmark(args):
         for prompt in prompts:
             print(f"  Generating: {prompt[:60]}...")
             if is_video:
-                out, t, mem = _generate_video(omni_qt, args, prompt, seed)
+                out, t, mem = _generate_video(omni_qt, args, prompt, seed, image=input_image)
             else:
                 out, t, mem = _generate_image(omni_qt, args, prompt, seed)
             qt_outputs[prompt] = (out, t, mem)
@@ -418,8 +445,13 @@ def parse_args():
     parser.add_argument(
         "--task",
         default="t2i",
-        choices=["t2i", "t2v"],
-        help="Task type: t2i (text-to-image) or t2v (text-to-video).",
+        choices=["t2i", "t2v", "i2v", "ti2v"],
+        help="Task type: t2i (text-to-image), t2v (text-to-video), i2v / ti2v (image-to-video).",
+    )
+    parser.add_argument(
+        "--image",
+        default=None,
+        help="Path to input image (required for i2v and ti2v tasks).",
     )
     parser.add_argument(
         "--quantization",
