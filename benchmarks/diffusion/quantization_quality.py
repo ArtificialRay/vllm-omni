@@ -223,18 +223,15 @@ def _generate_video(omni, args, prompt, seed, image=None):
         frames = first.images
     else:
         raise ValueError("Could not extract video frames from output.")
-    print(f"Generated video frames type: {type(frames)}, shape: {getattr(frames, 'shape', 'N/A')}")
+    #print(f"Generated video frames type: {type(frames)}, shape: {getattr(frames, 'shape', 'N/A')}")
+    if isinstance(frames,list):
+        frames = frames[0]
     if isinstance(frames, torch.Tensor):
         video = frames.detach().cpu()
         if video.dim() == 5:
             video = video[0].permute(1, 2, 3, 0) if video.shape[1] in (3, 4) else video[0]
-        if video.dim() == 4:
-            print(f"video frames has shape:{video.shape}")
-            if video.shape[0] in (3, 4):  # (C, F, H, W)
-                video = video.permute(1, 2, 3, 0)
-            elif video.shape[1] in (3, 4):  # (F, C, H, W)
-                video = video.permute(0, 2, 3, 1)
-            # else: already (F, H, W, C)
+        elif video.dim() == 4 and video.shape[0] in (3, 4):
+            video = video.permute(1, 2, 3, 0)
         if video.is_floating_point():
             video = video.clamp(-1, 1) * 0.5 + 0.5
         frames_array = video.float().numpy()
@@ -298,6 +295,7 @@ def run_benchmark(args):
     bl_avg_time = np.mean([v[1] for v in baseline_outputs.values()])
     bl_mem = baseline_outputs[prompts[0]][2]  # use first prompt's memory
     _unload_omni(omni_bl)
+    del omni_bl
 
     # Save baseline outputs
     bl_dir = output_dir / "baseline"
@@ -338,6 +336,7 @@ def run_benchmark(args):
         qt_avg_time = np.mean([v[1] for v in qt_outputs.values()])
         qt_mem = qt_outputs[prompts[0]][2]
         _unload_omni(omni_qt)
+        del omni_qt
 
         # Save quantized outputs
         qt_dir = output_dir / config_label.replace(" ", "_")

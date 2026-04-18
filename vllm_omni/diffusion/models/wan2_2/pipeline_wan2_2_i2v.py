@@ -357,7 +357,6 @@ class Wan22I2VPipeline(
         width = req.sampling_params.width or width
         num_frames = req.sampling_params.num_frames or frame_num
         num_steps = req.sampling_params.num_inference_steps or num_inference_steps
-        num_steps = min(num_steps, 2)  # DEBUG: cap for faster iteration
 
         # Respect per-request guidance_scale when explicitly provided.
         if req.sampling_params.guidance_scale_provided:
