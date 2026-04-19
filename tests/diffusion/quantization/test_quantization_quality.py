@@ -88,6 +88,19 @@ QUALITY_CONFIGS = [
         seed=142,
         num_inference_steps=20,
     ),
+    QualityTestConfig(
+        id="fp8_wan2-2_i2v",
+        model="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        quantization="fp8",
+        task="i2v",
+        prompt="Cherry blossoms swaying gently in the breeze",
+        max_lpips=0.20,
+        height=480,
+        width=832,
+        num_inference_steps=50,
+        num_frames=81,
+        seed=42,
+    )
 ]
 
 
@@ -104,7 +117,6 @@ def _generate_image(omni, config: QualityTestConfig):
     generator = torch.Generator(
         device=current_omni_platform.device_type,
     ).manual_seed(config.seed)
-    torch.cuda.reset_peak_memory_stats()
 
     outputs = omni.generate(
         {"prompt": config.prompt},
@@ -116,8 +128,8 @@ def _generate_image(omni, config: QualityTestConfig):
         ),
     )
 
-    peak_mem = torch.cuda.max_memory_allocated() / (1024**3)
     first = outputs[0]
+    peak_mem = getattr(first, "peak_memory_mb", 0.0) / 1024  # MB -> GiB
     if hasattr(first, "images") and first.images:
         return first.images[0], peak_mem
     inner = first.request_output

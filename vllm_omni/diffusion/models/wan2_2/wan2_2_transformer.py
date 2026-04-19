@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from diffusers.models.attention import FeedForward
 from diffusers.models.embeddings import PixArtAlphaTextProjection, TimestepEmbedding, Timesteps
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
+from diffusers.models.normalization import FP32LayerNorm
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -28,9 +29,6 @@ from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelOutput,
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
-from vllm_omni.diffusion.layers.adalayernorm import AdaLayerNorm
-from vllm_omni.diffusion.layers.norm import LayerNorm, RMSNorm
-from vllm_omni.platforms import current_omni_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
@@ -59,14 +57,10 @@ def apply_rotary_emb_wan(
     x1, x2 = hidden_states.unflatten(-1, (-1, 2)).unbind(-1)
     cos = freqs_cos[..., 0::2]
     sin = freqs_sin[..., 1::2]
-    rotated = torch.stack(
-        (
-            x1 * cos - x2 * sin,
-            x1 * sin + x2 * cos,
-        ),
-        dim=-1,
-    )
-    return rotated.flatten(-2, -1).to(hidden_states.dtype)
+    out = torch.empty_like(hidden_states)
+    out[..., 0::2] = x1 * cos - x2 * sin
+    out[..., 1::2] = x1 * sin + x2 * cos
+    return out.type_as(hidden_states)
 
 
 class DistributedRMSNorm(nn.Module):
@@ -113,7 +107,6 @@ class ColumnParallelGELU(nn.Module):
         approximate: str = "tanh",
         bias: bool = True,
         quant_config: "QuantizationConfig | None" = None,
-        prefix: str = "",
     ):
         super().__init__()
         self.proj = ColumnParallelLinear(
@@ -123,7 +116,6 @@ class ColumnParallelGELU(nn.Module):
             gather_output=False,
             return_bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}_proj"
         )
         self.approximate = approximate
 
@@ -145,13 +137,12 @@ class WanFeedForward(nn.Module):
         dim_out: int | None = None,
         bias: bool = True,
         quant_config: "QuantizationConfig | None" = None,
-        prefix: str = ""
     ) -> None:
         super().__init__()
         dim_out = dim_out or dim
 
         # ColumnParallel: scatter to each tp_rank
-        self.net_0 = ColumnParallelGELU(dim, inner_dim, approximate="tanh", bias=bias, quant_config=quant_config, prefix=f"{prefix}_net_0")
+        self.net_0 = ColumnParallelGELU(dim, inner_dim, approximate="tanh", bias=bias, quant_config=quant_config)
         # Placeholder for weight loading compatibility
         self.net_1 = nn.Identity()
         # RowParallel: gather from each tp_rank
@@ -162,7 +153,6 @@ class WanFeedForward(nn.Module):
             input_is_parallel=True,
             return_bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}_net_2"
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -193,7 +183,7 @@ class WanRotaryPosEmbed(nn.Module):
         # Split dimensions for temporal, height, width
         h_dim = w_dim = 2 * (attention_head_dim // 6)
         t_dim = attention_head_dim - h_dim - w_dim
-        freqs_dtype = torch.float64 if current_omni_platform.supports_float64() else torch.float32
+        freqs_dtype = torch.float32 if torch.backends.mps.is_available() else torch.float64
 
         freqs_cos = []
         freqs_sin = []
@@ -247,7 +237,7 @@ class WanRotaryPosEmbed(nn.Module):
         freqs_cos = torch.cat([freqs_cos_f, freqs_cos_h, freqs_cos_w], dim=-1).reshape(1, ppf * pph * ppw, 1, -1)
         freqs_sin = torch.cat([freqs_sin_f, freqs_sin_h, freqs_sin_w], dim=-1).reshape(1, ppf * pph * ppw, 1, -1)
 
-        return freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
+        return freqs_cos, freqs_sin
 
 
 class WanImageEmbedding(nn.Module):
@@ -256,9 +246,9 @@ class WanImageEmbedding(nn.Module):
     def __init__(self, in_features: int, out_features: int, pos_embed_seq_len: int | None = None):
         super().__init__()
 
-        self.norm1 = LayerNorm(in_features)
+        self.norm1 = FP32LayerNorm(in_features)
         self.ff = FeedForward(in_features, out_features, mult=1, activation_fn="gelu")
-        self.norm2 = LayerNorm(out_features)
+        self.norm2 = FP32LayerNorm(out_features)
         if pos_embed_seq_len is not None:
             self.pos_embed = nn.Parameter(torch.zeros(1, pos_embed_seq_len, in_features))
         else:
@@ -378,7 +368,6 @@ class WanSelfAttention(nn.Module):
         eps: float = 1e-5,
         dropout: float = 0.0,
         quant_config: "QuantizationConfig | None" = None,
-        prefix: str = ""
     ):
         super().__init__()
 
@@ -394,7 +383,6 @@ class WanSelfAttention(nn.Module):
             total_num_heads=num_heads,
             bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}_to_qkv"
         )
 
         self.num_heads = self.to_qkv.num_heads
@@ -402,12 +390,8 @@ class WanSelfAttention(nn.Module):
         self.tp_inner_dim = self.num_heads * head_dim
 
         # QK normalization using vLLM's RMSNorm
-        if get_tensor_model_parallel_world_size() > 1:
-            self.norm_q = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
-            self.norm_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
-        else:
-            self.norm_q = RMSNorm(self.tp_inner_dim, eps=eps)
-            self.norm_k = RMSNorm(self.tp_inner_dim, eps=eps)
+        self.norm_q = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+        self.norm_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
 
         self.to_out = RowParallelLinear(
             self.inner_dim,
@@ -416,7 +400,6 @@ class WanSelfAttention(nn.Module):
             input_is_parallel=True,
             return_bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}_to_out"
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -489,7 +472,6 @@ class WanCrossAttention(nn.Module):
         dropout: float = 0.0,
         added_kv_proj_dim: int | None = None,
         quant_config: "QuantizationConfig | None" = None,
-        prefix: str = ""
     ):
         super().__init__()
 
@@ -507,7 +489,6 @@ class WanCrossAttention(nn.Module):
             gather_output=False,
             return_bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}_to_q"
         )
 
         # Separate K and V projections for cross-attention
@@ -518,7 +499,6 @@ class WanCrossAttention(nn.Module):
             gather_output=False,
             return_bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}_to_k"
         )
 
         self.to_v = ColumnParallelLinear(
@@ -528,7 +508,6 @@ class WanCrossAttention(nn.Module):
             gather_output=False,
             return_bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}_to_v"
         )
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -536,12 +515,8 @@ class WanCrossAttention(nn.Module):
         self.tp_inner_dim = self.num_heads * head_dim
 
         # QK normalization
-        if get_tensor_model_parallel_world_size() > 1:
-            self.norm_q = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
-            self.norm_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
-        else:
-            self.norm_q = RMSNorm(self.tp_inner_dim, eps=eps)
-            self.norm_k = RMSNorm(self.tp_inner_dim, eps=eps)
+        self.norm_q = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
+        self.norm_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
 
         # Optional added KV projections for I2V (image embeddings)
         self.added_kv_proj_dim = added_kv_proj_dim
@@ -553,7 +528,6 @@ class WanCrossAttention(nn.Module):
                 gather_output=False,
                 return_bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}_add_k_proj"
             )
             self.add_v_proj = ColumnParallelLinear(
                 added_kv_proj_dim,
@@ -562,12 +536,8 @@ class WanCrossAttention(nn.Module):
                 gather_output=False,
                 return_bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}_add_v_proj"
             )
-            if get_tensor_model_parallel_world_size() > 1:
-                self.norm_added_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
-            else:
-                self.norm_added_k = RMSNorm(self.tp_inner_dim, eps=eps)
+            self.norm_added_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
         else:
             self.add_k_proj = None
             self.add_v_proj = None
@@ -581,7 +551,6 @@ class WanCrossAttention(nn.Module):
             input_is_parallel=True,
             return_bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}_to_out"
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -592,7 +561,6 @@ class WanCrossAttention(nn.Module):
             num_kv_heads=self.num_heads,
             softmax_scale=1.0 / (head_dim**0.5),
             causal=False,
-            skip_sequence_parallel=True,
         )
 
     def forward(
@@ -667,21 +635,19 @@ class WanTransformerBlock(nn.Module):
         added_kv_proj_dim: int | None = None,
         cross_attn_norm: bool = False,
         quant_config: "QuantizationConfig | None" = None,
-        prefix: str = ""
     ):
         super().__init__()
 
         head_dim = dim // num_heads
 
         # 1. Self-attention
-        self.norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.norm1 = FP32LayerNorm(dim, eps, elementwise_affine=False)
         self.attn1 = WanSelfAttention(
             dim=dim,
             num_heads=num_heads,
             head_dim=head_dim,
             eps=eps,
             quant_config=quant_config,
-            prefix=f"{prefix}_attn1"
         )
 
         # 2. Cross-attention
@@ -692,13 +658,12 @@ class WanTransformerBlock(nn.Module):
             eps=eps,
             added_kv_proj_dim=added_kv_proj_dim,
             quant_config=quant_config,
-            prefix=f"{prefix}_attn2"
         )
-        self.norm2 = LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
+        self.norm2 = FP32LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
 
         # 3. Feed-forward
-        self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config, prefix=f"{prefix}_ffn")
-        self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config)
+        self.norm3 = FP32LayerNorm(dim, eps, elementwise_affine=False)
 
         # Scale-shift table for modulation
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
@@ -714,7 +679,7 @@ class WanTransformerBlock(nn.Module):
         if temb.ndim == 4:
             # temb: batch_size, seq_len, 6, inner_dim (wan2.2 ti2v)
             shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
-                self.scale_shift_table.unsqueeze(0) + temb
+                self.scale_shift_table.unsqueeze(0) + temb.float()
             ).chunk(6, dim=2)
             shift_msa = shift_msa.squeeze(2)
             scale_msa = scale_msa.squeeze(2)
@@ -725,23 +690,25 @@ class WanTransformerBlock(nn.Module):
         else:
             # temb: batch_size, 6, inner_dim (wan2.1/wan2.2 14B)
             shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
-                self.scale_shift_table + temb
+                self.scale_shift_table + temb.float()
             ).chunk(6, dim=1)
 
         # 1. Self-attention
-        norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa).type_as(hidden_states)
+        norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
         attn_output = self.attn1(norm_hidden_states, rotary_emb, hidden_states_mask)
-        hidden_states = (hidden_states + attn_output * gate_msa).type_as(hidden_states)
+        hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
 
         # 2. Cross-attention
-        norm_hidden_states = self.norm2(hidden_states).type_as(hidden_states)
+        norm_hidden_states = self.norm2(hidden_states.float()).type_as(hidden_states)
         attn_output = self.attn2(norm_hidden_states, encoder_hidden_states)
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
-        norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa).type_as(hidden_states)
+        norm_hidden_states = (self.norm3(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(
+            hidden_states
+        )
         ff_output = self.ffn(norm_hidden_states)
-        hidden_states = (hidden_states + ff_output * c_gate_msa).type_as(hidden_states)
+        hidden_states = (hidden_states.float() + ff_output.float() * c_gate_msa).type_as(hidden_states)
 
         return hidden_states
 
@@ -782,7 +749,7 @@ class WanTransformer3DModel(nn.Module):
     """
 
     _repeated_blocks = ["WanTransformerBlock"]
-    _layerwise_offload_blocks_attrs = ["blocks"]
+    _layerwise_offload_blocks_attr = "blocks"
     packed_modules_mapping = {
         "to_qkv": ["to_q", "to_k", "to_v"],
     }
@@ -913,14 +880,13 @@ class WanTransformer3DModel(nn.Module):
                     added_kv_proj_dim,
                     cross_attn_norm,
                     quant_config=quant_config,
-                    prefix=f"blocks.{i}"
                 )
-                for i in range(num_layers)
+                for _ in range(num_layers)
             ]
         )
 
         # 4. Output norm & projection
-        self.norm_out = AdaLayerNorm(inner_dim, elementwise_affine=False, eps=eps)
+        self.norm_out = FP32LayerNorm(inner_dim, eps, elementwise_affine=False)
         self.proj_out = nn.Linear(inner_dim, out_channels * math.prod(patch_size))
 
         # SP helper modules
@@ -1008,7 +974,7 @@ class WanTransformer3DModel(nn.Module):
             shift = shift.unsqueeze(1)
             scale = scale.unsqueeze(1)
 
-        hidden_states = self.norm_out(hidden_states, scale, shift).type_as(hidden_states)
+        hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(hidden_states)
         hidden_states = self.proj_out(hidden_states)
 
         hidden_states = hidden_states.reshape(
@@ -1080,14 +1046,6 @@ class WanTransformer3DModel(nn.Module):
 
                 if ".to_out.0." in lookup_name:
                     lookup_name = lookup_name.replace(".to_out.0.", ".to_out.")
-
-                # Compatibility: some Wan conversion pipelines still keep
-                # block modulation keys as `blocks.N.modulation` instead of
-                # `blocks.N.scale_shift_table`.
-                if lookup_name.endswith(".modulation"):
-                    modulation_alias = lookup_name[: -len(".modulation")] + ".scale_shift_table"
-                    if modulation_alias in params_dict:
-                        lookup_name = modulation_alias
 
                 if lookup_name not in params_dict:
                     logger.warning(f"Skipping weight {original_name} -> {lookup_name}")

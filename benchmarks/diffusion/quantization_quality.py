@@ -63,25 +63,11 @@ Output directory structure (--output-dir, default: ./quant_bench_output):
 
 import argparse
 import gc
-import subprocess
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
-
-
-def _get_gpu_memory_gib(device_idx: int = 0) -> float:
-    """Query current GPU memory usage via nvidia-smi (works across worker processes)."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", f"--id={device_idx}", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, check=True,
-        )
-        used_mib = float(result.stdout.strip().split("\n")[0])
-        return used_mib / 1024
-    except Exception:
-        return 0.0
 
 
 def compute_lpips_images(
@@ -187,9 +173,9 @@ def _generate_image(omni, args, prompt, seed):
         ),
     )
     elapsed = time.perf_counter() - start
-    peak_mem = _get_gpu_memory_gib()
 
     first = outputs[0]
+    peak_mem = getattr(first, "peak_memory_mb", 0.0) / 1024  # MB -> GiB
     req_out = first.request_output[0] if hasattr(first, "request_output") else first
     img = req_out.images[0]
     return img, elapsed, peak_mem
@@ -222,9 +208,9 @@ def _generate_video(omni, args, prompt, seed, image=None):
         ),
     )
     elapsed = time.perf_counter() - start
-    peak_mem = _get_gpu_memory_gib()
 
     first = outputs[0]
+    peak_mem = getattr(first, "peak_memory_mb", 0.0) / 1024  # MB -> GiB
     if hasattr(first, "request_output") and isinstance(first.request_output, list):
         inner = first.request_output[0]
         if isinstance(inner, OmniRequestOutput) and hasattr(inner, "images"):
