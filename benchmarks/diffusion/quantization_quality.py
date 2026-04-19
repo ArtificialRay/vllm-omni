@@ -63,11 +63,25 @@ Output directory structure (--output-dir, default: ./quant_bench_output):
 
 import argparse
 import gc
+import subprocess
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+
+
+def _get_gpu_memory_gib(device_idx: int = 0) -> float:
+    """Query current GPU memory usage via nvidia-smi (works across worker processes)."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", f"--id={device_idx}", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True,
+        )
+        used_mib = float(result.stdout.strip().split("\n")[0])
+        return used_mib / 1024
+    except Exception:
+        return 0.0
 
 
 def compute_lpips_images(
@@ -162,7 +176,6 @@ def _generate_image(omni, args, prompt, seed):
     from vllm_omni.platforms import current_omni_platform
 
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(seed)
-    torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     outputs = omni.generate(
         {"prompt": prompt},
@@ -174,7 +187,7 @@ def _generate_image(omni, args, prompt, seed):
         ),
     )
     elapsed = time.perf_counter() - start
-    peak_mem = torch.cuda.max_memory_allocated() / (1024**3)
+    peak_mem = _get_gpu_memory_gib()
 
     first = outputs[0]
     req_out = first.request_output[0] if hasattr(first, "request_output") else first
@@ -196,7 +209,6 @@ def _generate_video(omni, args, prompt, seed, image=None):
         request["multi_modal_data"] = {"image": image}
 
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(seed)
-    torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     outputs = omni.generate(
         request,
@@ -210,7 +222,7 @@ def _generate_video(omni, args, prompt, seed, image=None):
         ),
     )
     elapsed = time.perf_counter() - start
-    peak_mem = torch.cuda.max_memory_allocated() / (1024**3)
+    peak_mem = _get_gpu_memory_gib()
 
     first = outputs[0]
     if hasattr(first, "request_output") and isinstance(first.request_output, list):

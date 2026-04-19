@@ -113,6 +113,7 @@ class ColumnParallelGELU(nn.Module):
         approximate: str = "tanh",
         bias: bool = True,
         quant_config: "QuantizationConfig | None" = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.proj = ColumnParallelLinear(
@@ -122,6 +123,7 @@ class ColumnParallelGELU(nn.Module):
             gather_output=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}_proj"
         )
         self.approximate = approximate
 
@@ -143,12 +145,13 @@ class WanFeedForward(nn.Module):
         dim_out: int | None = None,
         bias: bool = True,
         quant_config: "QuantizationConfig | None" = None,
+        prefix: str = ""
     ) -> None:
         super().__init__()
         dim_out = dim_out or dim
 
         # ColumnParallel: scatter to each tp_rank
-        self.net_0 = ColumnParallelGELU(dim, inner_dim, approximate="tanh", bias=bias, quant_config=quant_config)
+        self.net_0 = ColumnParallelGELU(dim, inner_dim, approximate="tanh", bias=bias, quant_config=quant_config, prefix=f"{prefix}_net_0")
         # Placeholder for weight loading compatibility
         self.net_1 = nn.Identity()
         # RowParallel: gather from each tp_rank
@@ -159,6 +162,7 @@ class WanFeedForward(nn.Module):
             input_is_parallel=True,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}_net_2"
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -374,6 +378,7 @@ class WanSelfAttention(nn.Module):
         eps: float = 1e-5,
         dropout: float = 0.0,
         quant_config: "QuantizationConfig | None" = None,
+        prefix: str = ""
     ):
         super().__init__()
 
@@ -389,6 +394,7 @@ class WanSelfAttention(nn.Module):
             total_num_heads=num_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}_to_qkv"
         )
 
         self.num_heads = self.to_qkv.num_heads
@@ -410,6 +416,7 @@ class WanSelfAttention(nn.Module):
             input_is_parallel=True,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}_to_out"
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -482,6 +489,7 @@ class WanCrossAttention(nn.Module):
         dropout: float = 0.0,
         added_kv_proj_dim: int | None = None,
         quant_config: "QuantizationConfig | None" = None,
+        prefix: str = ""
     ):
         super().__init__()
 
@@ -499,6 +507,7 @@ class WanCrossAttention(nn.Module):
             gather_output=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}_to_q"
         )
 
         # Separate K and V projections for cross-attention
@@ -509,6 +518,7 @@ class WanCrossAttention(nn.Module):
             gather_output=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}_to_k"
         )
 
         self.to_v = ColumnParallelLinear(
@@ -518,6 +528,7 @@ class WanCrossAttention(nn.Module):
             gather_output=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}_to_v"
         )
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -542,6 +553,7 @@ class WanCrossAttention(nn.Module):
                 gather_output=False,
                 return_bias=False,
                 quant_config=quant_config,
+                prefix=f"{prefix}_add_k_proj"
             )
             self.add_v_proj = ColumnParallelLinear(
                 added_kv_proj_dim,
@@ -550,6 +562,7 @@ class WanCrossAttention(nn.Module):
                 gather_output=False,
                 return_bias=False,
                 quant_config=quant_config,
+                prefix=f"{prefix}_add_v_proj"
             )
             if get_tensor_model_parallel_world_size() > 1:
                 self.norm_added_k = DistributedRMSNorm(self.tp_inner_dim, eps=eps)
@@ -568,6 +581,7 @@ class WanCrossAttention(nn.Module):
             input_is_parallel=True,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}_to_out"
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -653,6 +667,7 @@ class WanTransformerBlock(nn.Module):
         added_kv_proj_dim: int | None = None,
         cross_attn_norm: bool = False,
         quant_config: "QuantizationConfig | None" = None,
+        prefix: str = ""
     ):
         super().__init__()
 
@@ -666,6 +681,7 @@ class WanTransformerBlock(nn.Module):
             head_dim=head_dim,
             eps=eps,
             quant_config=quant_config,
+            prefix=f"{prefix}_attn1"
         )
 
         # 2. Cross-attention
@@ -676,11 +692,12 @@ class WanTransformerBlock(nn.Module):
             eps=eps,
             added_kv_proj_dim=added_kv_proj_dim,
             quant_config=quant_config,
+            prefix=f"{prefix}_attn2"
         )
         self.norm2 = LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
 
         # 3. Feed-forward
-        self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config)
+        self.ffn = WanFeedForward(dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config, prefix=f"{prefix}_ffn")
         self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
 
         # Scale-shift table for modulation
@@ -896,8 +913,9 @@ class WanTransformer3DModel(nn.Module):
                     added_kv_proj_dim,
                     cross_attn_norm,
                     quant_config=quant_config,
+                    prefix=f"blocks.{i}"
                 )
-                for _ in range(num_layers)
+                for i in range(num_layers)
             ]
         )
 
