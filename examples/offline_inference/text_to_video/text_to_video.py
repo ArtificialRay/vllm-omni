@@ -62,7 +62,6 @@ def parse_args() -> argparse.Namespace:
         help="Override model class name (e.g., LTX2TwoStagesVideoPipeline).",
     )
     parser.add_argument("--prompt", default="A serene lakeside sunrise with mist over the water.", help="Text prompt.")
-    parser.add_argument("--image", default=None, help="Optional image prompt for text+image to video generation (path or URL).")
     parser.add_argument("--negative-prompt", default="", help="Negative prompt.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--guidance-scale", type=float, default=None, help="CFG scale. Default: model-specific.")
@@ -275,11 +274,6 @@ def main():
     prompt_dict = {"prompt": args.prompt}
     if args.negative_prompt:
         prompt_dict["negative_prompt"] = args.negative_prompt
-    if args.image:
-        from PIL import Image
-        image = Image.open(args.image).convert("RGB")
-        image = image.resize((args.width, args.height), Image.Resampling.LANCZOS)
-        prompt_dict["multi_modal_data"] = {"image": image}
 
     sampling_kwargs = dict(
         height=args.height,

@@ -194,6 +194,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable diffusion pipeline profiler to display stage durations.",
     )
+    parser.add_argument(
+        "--enable-cache-dit-summary",
+        action="store_true",
+        help="Enable cache-dit summary logging after diffusion forward passes.",
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        choices=["fp8", "gguf"],
+        help="Quantization method for the transformer (fp8 for online FP8 quantization).",
+    )
     return parser.parse_args()
 
 
@@ -300,7 +312,10 @@ def main():
         cache_backend=args.cache_backend,
         cache_config=cache_config,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
+        quantization=args.quantization,
+        enable_cache_dit_summary=args.enable_cache_dit_summary,
     )
+    
 
     if profiler_enabled:
         print("[Profiler] Starting profiling...")
