@@ -39,6 +39,7 @@ image = (
     .run_commands(
         "uv pip uninstall --system opencv-python || true",
         "uv pip install --system --reinstall opencv-python-headless",
+        "uv pip install --system 'nvidia-modelopt[all]'"
     )
 )
 
