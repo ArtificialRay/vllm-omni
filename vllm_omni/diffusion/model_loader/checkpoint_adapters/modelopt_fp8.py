@@ -264,6 +264,7 @@ class ModelOptFp8CheckpointAdapter:
         for name, tensor in weights:
             target_name = self._resolve_target_name(name)
             if self._is_scale(name):
+                print(f"Handling scale tensor {name} for target {target_name}")
                 yield from self._handle_scale_tensor(name, tensor, target_name, state)
                 continue
 

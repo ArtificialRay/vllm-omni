@@ -37,10 +37,11 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
-        input_scale: torch.Tensor | None = None # TODO: what is the type?
+        input_scale: torch.Tensor | None = None 
     ) -> torch.Tensor:
         if self.return_fp8:
             from vllm_omni.diffusion.layers.fused_adaln_fp8 import fused_adaln_fp8
+            logger.info_once(f"Running fused AdaLayerNorm in FP8 mode with input scale {input_scale}, shape {input_scale.shape}")
             output,_ = fused_adaln_fp8(x,1+scale,shift,self.eps,input_scale)
             return output
         return self.forward_native(x, scale, shift)
