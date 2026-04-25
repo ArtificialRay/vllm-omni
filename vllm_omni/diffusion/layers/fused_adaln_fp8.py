@@ -36,8 +36,7 @@ def _fused_adaln_fp8_per_token_kernel(
     X_ptr,                      # pointer to the input activations,              shape [N, D], bf16
     SCALE_ptr,                  # pointer to AdaLN scale (pre-incremented 1 + scale_msa), shape [N, D], bf16
     SHIFT_ptr,                  # pointer to AdaLN shift (shift_msa),            shape [N, D], bf16
-    Y_ptr,                      # pointer to the quantized output,               shape [N, D], float8_e4m3fn
-    YSCALE_ptr,                 # pointer to the per-token scale output,         shape [N],    fp32
+    Y_ptr,                      # pointer to the quantized output,               shape [N, D], float8_e4m3fn,         shape [N],    fp32
     stride_x_n,                 # how much to increase X_ptr when moving by 1 row
     stride_x_d,                 # how much to increase X_ptr when moving by 1 column (typically 1)
     stride_scale_n,             # how much to increase SCALE_ptr when moving by 1 row
@@ -110,7 +109,7 @@ def _fused_adaln_fp8_per_token_kernel(
 
     # 6. Store quantized row + per-token scale.
     tl.store(Y_ptr + cols, y_q, mask=mask)
-    tl.store(YSCALE_ptr + row, y_scale)
+    #tl.store(YSCALE_ptr + row, y_scale)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -226,13 +225,12 @@ def fused_adaln_fp8(
     N, D = x.shape
 
     x_fp8 = torch.empty((N, D), dtype=_FP8_DTYPE, device=x.device)
-    x_scale = torch.empty((N,), dtype=torch.float32, device=x.device)
 
     BLOCK_SIZE = triton.next_power_of_2(D)
     num_warps = _pick_num_warps(BLOCK_SIZE)
 
     _fused_adaln_fp8_per_token_kernel[(N,)](
-        x, scale, shift, x_fp8, x_scale,
+        x, scale, shift, x_fp8,
         x.stride(0), x.stride(1),
         scale.stride(0), scale.stride(1),
         shift.stride(0), shift.stride(1),
@@ -243,7 +241,7 @@ def fused_adaln_fp8(
         input_scale=input_scale,
         num_warps=num_warps,
     )
-    return x_fp8, x_scale
+    return x_fp8
 
 
 def fused_adaln_fp8_per_group(

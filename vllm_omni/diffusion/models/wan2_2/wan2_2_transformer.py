@@ -773,7 +773,7 @@ class WanTransformerBlock(nn.Module):
 
         # 1. Self-attention
         if self._use_fp8_adaln_fusion:
-            input_scale = self.attn1.to_qkv.input_scale
+            input_scale = self.attn1.to_qkv.input_scale.data
             logger.info_once(f"Using FP8 AdaLN fusion in {self.attn1.__class__.__name__} with scale {input_scale}")
             #assert input_scale.size() == (1,) # Debug checkpoint
             norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa, input_scale).type_as(hidden_states)
@@ -789,7 +789,7 @@ class WanTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         if self._use_fp8_adaln_fusion:
-            input_scale = self.ffn.net_0.proj.input_scale
+            input_scale = self.ffn.net_0.proj.input_scale.data
             logger.info_once(f"Using FP8 AdaLN fusion in {self.ffn.net_0.proj.__class__.__name__} with scale {input_scale}")
             norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa, input_scale).type_as(hidden_states)
         else:

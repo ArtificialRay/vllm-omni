@@ -42,7 +42,13 @@ class AdaLayerNorm(CustomOp):
         if self.return_fp8:
             from vllm_omni.diffusion.layers.fused_adaln_fp8 import fused_adaln_fp8
             logger.info_once(f"Running fused AdaLayerNorm in FP8 mode with input scale {input_scale}, shape {input_scale.shape}")
-            output,_ = fused_adaln_fp8(x,1+scale,shift,self.eps,input_scale)
+            # scale and shift should broadcast to the same size of x
+            orig_shape = x.shape
+            D = orig_shape[-1]
+            x = x.view(-1, D)
+            scale = (1+scale).expand(orig_shape).contiguous().view(-1, D)
+            shift = shift.expand(orig_shape).contiguous().view(-1, D)
+            output,_ = fused_adaln_fp8(x,scale,shift,self.eps,input_scale)
             return output
         return self.forward_native(x, scale, shift)
 
