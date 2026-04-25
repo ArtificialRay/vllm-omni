@@ -240,7 +240,7 @@ def fused_adaln_fp8(
         D=D, EPS=eps,
         FP8_MIN=FP8_MIN, FP8_MAX=FP8_MAX,
         BLOCK_SIZE=BLOCK_SIZE,
-        input_scale=input_scale
+        input_scale=input_scale,
         num_warps=num_warps,
     )
     return x_fp8, x_scale
