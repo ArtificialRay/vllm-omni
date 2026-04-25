@@ -245,12 +245,12 @@ class Wan22I2VPipeline(
         # Load config from model directory or HF Hub to get correct in_channels for I2V models
         transformer_config = load_transformer_config(model, "transformer", local_files_only)
         self.transformer = create_transformer_from_config(
-            transformer_config, quant_config=od_config.quantization_config
+            transformer_config, quant_config=od_config.quantization_config,use_fp8_adaln_fusion=od_config.use_fp8_adaln_fusion
         )
         if self.has_transformer_2:
             transformer_2_config = load_transformer_config(model, "transformer_2", local_files_only)
             self.transformer_2 = create_transformer_from_config(
-                transformer_2_config, quant_config=od_config.quantization_config
+                transformer_2_config, quant_config=od_config.quantization_config, use_fp8_adaln_fusion=od_config.use_fp8_adaln_fusion
             )
         else:
             self.transformer_2 = None

@@ -13,11 +13,11 @@ block-wise W8A8 and vLLM's ``per_token_group_quant_fp8`` path.
 """
 
 from __future__ import annotations
-
+import logging
 import torch
 import triton
 import triton.language as tl
-
+logger = logging.getLogger(__name__)
 # Resolve FP8 range from the target dtype (handles CUDA e4m3fn = 448.0 and
 # ROCm e4m3fnuz = 224.0 uniformly).
 _FP8_DTYPE = torch.float8_e4m3fn
@@ -46,6 +46,7 @@ def _fused_adaln_fp8_per_token_kernel(
     stride_shift_d,             # how much to increase SHIFT_ptr when moving by 1 column
     stride_y_n,                 # how much to increase Y_ptr when moving by 1 row
     stride_y_d,                 # how much to increase Y_ptr when moving by 1 column
+    input_scale,                # input scale for pre-tensor quant
     D: tl.constexpr,            # number of columns in X (hidden dim) -- the reduction axis
     EPS: tl.constexpr,          # epsilon added to variance to avoid division by zero
     FP8_MIN: tl.constexpr,      # lower clamp bound (-448.0 for e4m3fn, -224.0 for e4m3fnuz)
@@ -70,6 +71,10 @@ def _fused_adaln_fp8_per_token_kernel(
     """
     # One program per row. BLOCK_SIZE = next_power_of_2(D), so the whole
     # row fits in a single tile -- no streaming loop needed.
+    # DEBUG: if this fused kernel really runs
+    if not hasattr(fused_adaln_fp8,"_fired"):
+        logger.info("Fused AdaLN+FP8 kernel fired for the first time!")
+        fused_adaln_fp8._fired = True
     row = tl.program_id(0).to(tl.int64)
     X_ptr += row * stride_x_n
     SCALE_ptr += row * stride_scale_n
@@ -95,13 +100,13 @@ def _fused_adaln_fp8_per_token_kernel(
     b = tl.load(SHIFT_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     y = x_norm * s + b
 
-    # 4. Per-token absmax with eps-floor (branchless zero-guard).
-    absmax = tl.maximum(tl.max(tl.abs(y), axis=0), EPS)
-    y_scale = absmax * (1.0 / FP8_MAX)
+    # # 4. Per-token absmax with eps-floor (branchless zero-guard).
+    # absmax = tl.maximum(tl.max(tl.abs(y), axis=0), EPS)
+    # y_scale = absmax * (1.0 / FP8_MAX)
 
-    # 5. Clamp then cast -- clamp guards against values that round up past
+    # 4. Clamp then cast -- clamp guards against values that round up past
     #    FP8_MAX and would otherwise become +inf in the fp8 cast.
-    y_q = tl.clamp(y / y_scale, FP8_MIN, FP8_MAX).to(Y_ptr.dtype.element_ty)
+    y_q = tl.clamp(y / input_scale, FP8_MIN, FP8_MAX).to(Y_ptr.dtype.element_ty)
 
     # 6. Store quantized row + per-token scale.
     tl.store(Y_ptr + cols, y_q, mask=mask)
@@ -209,6 +214,7 @@ def fused_adaln_fp8(
     scale: torch.Tensor,      # [N, D] BF16  (this is (1 + scale_msa), NOT scale_msa)
     shift: torch.Tensor,      # [N, D] BF16
     eps: float = 1e-6,
+    input_scale: torch.Tensor | None = None, # optional pre-tensor quant scale; if None, the kernel computes its own per-token scales
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused AdaLN + per-token FP8 quantization.
 
@@ -234,6 +240,7 @@ def fused_adaln_fp8(
         D=D, EPS=eps,
         FP8_MIN=FP8_MIN, FP8_MAX=FP8_MAX,
         BLOCK_SIZE=BLOCK_SIZE,
+        input_scale=input_scale
         num_warps=num_warps,
     )
     return x_fp8, x_scale

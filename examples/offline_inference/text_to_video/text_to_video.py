@@ -176,7 +176,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--use-fp8-adaln-fusion",
         action="store_true",
-        help="Enable FP8 AdaLN fusion for MoE layers.",
+        help="Enable FP8 AdaLN fusion for adalayernorm or layernorm fusion.",
     )
     parser.add_argument(
         "--enable-diffusion-pipeline-profiler",

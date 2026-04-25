@@ -203,7 +203,7 @@ class Wan22TI2VPipeline(nn.Module, SupportImageInput, CFGParallelMixin, Progress
         # Load config from model to get correct dimensions
         transformer_config = load_transformer_config(model, "transformer", local_files_only)
         self.transformer = create_transformer_from_config(
-            transformer_config, quant_config=od_config.quantization_config
+            transformer_config, quant_config=od_config.quantization_config,use_fp8_adaln_fusion=od_config.use_fp8_adaln_fusion, prefix="transformer"
         )
 
         self._sample_solver = "unipc"

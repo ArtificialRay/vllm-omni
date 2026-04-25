@@ -150,6 +150,7 @@ def _build_omni_kwargs(args, quantization=None):
         "model": args.model,
         "parallel_config": parallel_config,
         "enforce_eager": args.enforce_eager,
+        "use_fp8_adaln_fusion": args.use_fp8_adaln_fusion,
     }
     if quantization:
         kwargs["quantization_config"] = quantization
@@ -486,6 +487,11 @@ def parse_args():
     parser.add_argument("--ring-degree", type=int, default=1)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument(
+        "--use-fp8-adaln-fusion",
+        action="store_true",
+        help="Enable FP8 AdaLN fusion for adalayernorm or layernorm fusion.",
+    )
     return parser.parse_args()
 
 

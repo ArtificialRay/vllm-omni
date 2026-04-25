@@ -145,10 +145,11 @@ class WanFeedForward(nn.Module):
         bias: bool = True,
         quant_config: "QuantizationConfig | None" = None,
         prefix: str = "",
+        use_fp8_adaln_fusion: bool = False,
     ) -> None:
         super().__init__()
         dim_out = dim_out or dim
-
+        self._use_fp8_adaln_fusion = use_fp8_adaln_fusion
         # ColumnParallel: scatter to each tp_rank
         self.net_0 = ColumnParallelGELU(
             dim, inner_dim, approximate="tanh", bias=bias, quant_config=quant_config, prefix=f"{prefix}.net_0"
@@ -167,7 +168,7 @@ class WanFeedForward(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if hidden_states.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        if self._use_fp8_adaln_fusion and hidden_states.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
             # input is already in FP8, skip preparation
             proj = self.net_0.proj
             x_2d = hidden_states.view(-1, hidden_states.shape[-1])
@@ -396,6 +397,7 @@ class WanSelfAttention(nn.Module):
         dropout: float = 0.0,
         quant_config: "QuantizationConfig | None" = None,
         prefix: str = "",
+        use_fp8_adaln_fusion: bool = False,
     ):
         super().__init__()
 
@@ -403,7 +405,7 @@ class WanSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.inner_dim = num_heads * head_dim
-
+        self._use_fp8_adaln_fusion = use_fp8_adaln_fusion
         # Fused QKV projection using vLLM's optimized layer
         self.to_qkv = QKVParallelLinear(
             hidden_size=dim,
@@ -454,7 +456,7 @@ class WanSelfAttention(nn.Module):
     ) -> torch.Tensor:
         # Ensure contiguous for FP8 quantized linear layers
         hidden_states = hidden_states.contiguous()
-        if hidden_states.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        if self._use_fp8_adaln_fusion and hidden_states.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
             # input is already in FP8, skip preparation
             x_2d = hidden_states.view(-1, hidden_states.shape[-1])
             output_shape = [*hidden_states.shape[:-1], self.to_qkv.weight.shape[0]]
@@ -709,8 +711,7 @@ class WanTransformerBlock(nn.Module):
         super().__init__()
 
         head_dim = dim // num_heads
-        if quant_config is not None and use_fp8_adaln_fusion:
-            self._use_fp8_adaln_fusion = use_fp8_adaln_fusion
+        self._use_fp8_adaln_fusion = use_fp8_adaln_fusion
         # 1. Self-attention
         self.norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps,return_fp8=self._use_fp8_adaln_fusion)
         self.attn1 = WanSelfAttention(
@@ -720,6 +721,7 @@ class WanTransformerBlock(nn.Module):
             eps=eps,
             quant_config=quant_config,
             prefix=f"{prefix}.attn1",
+            use_fp8_adaln_fusion=use_fp8_adaln_fusion,
         )
 
         # 2. Cross-attention
@@ -736,7 +738,7 @@ class WanTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         self.ffn = WanFeedForward(
-            dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config, prefix=f"{prefix}.ffn"
+            dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config, prefix=f"{prefix}.ffn",use_fp8_adaln_fusion=use_fp8_adaln_fusion,
         )
         self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps, return_fp8=self._use_fp8_adaln_fusion)
 

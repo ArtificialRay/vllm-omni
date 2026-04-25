@@ -37,11 +37,11 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
-        input_scale: torch.Tensor | None = None, # TODO: what is the type?
+        input_scale: torch.Tensor | None = None # TODO: what is the type?
     ) -> torch.Tensor:
         if self.return_fp8:
             from vllm_omni.diffusion.layers.fused_adaln_fp8 import fused_adaln_fp8
-            output,_ = fused_adaln_fp8(x,scale,shift,self.eps)
+            output,_ = fused_adaln_fp8(x,1+scale,shift,self.eps,input_scale)
             return output
         return self.forward_native(x, scale, shift)
 
@@ -50,6 +50,7 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
+        input_scale: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.forward_native(x, scale, shift)
 
@@ -58,6 +59,7 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
+        input_scale: torch.Tensor | None = None
     ) -> torch.Tensor:
         if _HAS_MINDIESD:
             try:
@@ -82,6 +84,7 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
+        input_scale: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.forward_native(x, scale, shift)
 
