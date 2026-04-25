@@ -167,7 +167,23 @@ class WanFeedForward(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.net_0(hidden_states)
+        if hidden_states.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            # input is already in FP8, skip preparation
+            proj = self.net_0.proj
+            x_2d = hidden_states.view(-1, hidden_states.shape[-1])
+            output_shape = [*hidden_states.shape[:-1], proj.weight.shape[0]]
+            x_after_proj = proj.quant_method.fp8_linear.apply_scaled_mm(
+                A=x_2d,
+                B=proj.weight,
+                As=proj.input_scale,
+                Bs=proj.weight_scale,
+                bias=proj.bias,
+                out_dtype=torch.bfloat16,
+                output_shape=output_shape,
+            )
+            hidden_states = F.gelu(x_after_proj, approximate=self.net_0.approximate)
+        else:
+            hidden_states = self.net_0(hidden_states)
         hidden_states = self.net_1(hidden_states)
         hidden_states = self.net_2(hidden_states)
         return hidden_states
@@ -438,8 +454,22 @@ class WanSelfAttention(nn.Module):
     ) -> torch.Tensor:
         # Ensure contiguous for FP8 quantized linear layers
         hidden_states = hidden_states.contiguous()
-        # Fused QKV projection
-        qkv, _ = self.to_qkv(hidden_states)
+        if hidden_states.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            # input is already in FP8, skip preparation
+            x_2d = hidden_states.view(-1, hidden_states.shape[-1])
+            output_shape = [*hidden_states.shape[:-1], self.to_qkv.weight.shape[0]]
+            qkv = self.to_qkv.quant_method.fp8_linear.apply_scaled_mm(
+                A=x_2d,
+                B=self.to_qkv.weight,
+                As=self.to_qkv.input_scale,   
+                Bs=self.to_qkv.weight_scale,
+                bias=self.to_qkv.bias,
+                out_dtype=torch.bfloat16,
+                output_shape=output_shape,
+            )
+        else:
+            # Fused QKV projection
+            qkv, _ = self.to_qkv(hidden_states)
 
         q_size = self.num_heads * self.head_dim
         kv_size = self.num_kv_heads * self.head_dim
@@ -674,13 +704,15 @@ class WanTransformerBlock(nn.Module):
         cross_attn_norm: bool = False,
         quant_config: "QuantizationConfig | None" = None,
         prefix: str = "",
+        use_fp8_adaln_fusion: bool = False,
     ):
         super().__init__()
 
         head_dim = dim // num_heads
-
+        if quant_config is not None and use_fp8_adaln_fusion:
+            self._use_fp8_adaln_fusion = use_fp8_adaln_fusion
         # 1. Self-attention
-        self.norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps,return_fp8=self._use_fp8_adaln_fusion)
         self.attn1 = WanSelfAttention(
             dim=dim,
             num_heads=num_heads,
@@ -706,11 +738,10 @@ class WanTransformerBlock(nn.Module):
         self.ffn = WanFeedForward(
             dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config, prefix=f"{prefix}.ffn"
         )
-        self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps, return_fp8=self._use_fp8_adaln_fusion)
 
         # Scale-shift table for modulation
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -737,7 +768,11 @@ class WanTransformerBlock(nn.Module):
             ).chunk(6, dim=1)
 
         # 1. Self-attention
-        norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa).type_as(hidden_states)
+        if self._use_fp8_adaln_fusion:
+            input_scale = self.attn1.to_qkv.input_scale
+            norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa, input_scale).type_as(hidden_states)
+        else:
+            norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa).type_as(hidden_states)
         attn_output = self.attn1(norm_hidden_states, rotary_emb, hidden_states_mask)
         hidden_states = (hidden_states + attn_output * gate_msa).type_as(hidden_states)
 
@@ -747,7 +782,11 @@ class WanTransformerBlock(nn.Module):
         hidden_states = hidden_states + attn_output
 
         # 3. Feed-forward
-        norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa).type_as(hidden_states)
+        if self._use_fp8_adaln_fusion:
+            input_scale = self.ffn.net_0.proj.input_scale
+            norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa, input_scale).type_as(hidden_states)
+        else:
+            norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa).type_as(hidden_states)
         ff_output = self.ffn(norm_hidden_states)
         hidden_states = (hidden_states + ff_output * c_gate_msa).type_as(hidden_states)
 
@@ -873,6 +912,7 @@ class WanTransformer3DModel(nn.Module):
         rope_max_seq_len: int = 1024,
         pos_embed_seq_len: int | None = None,
         quant_config: "QuantizationConfig | None" = None,
+        use_fp8_adaln_fusion: bool = False,
     ):
         super().__init__()
 
@@ -933,6 +973,7 @@ class WanTransformer3DModel(nn.Module):
                     cross_attn_norm,
                     quant_config=quant_config,
                     prefix=f"blocks.{i}",
+                    use_fp8_adaln_fusion=use_fp8_adaln_fusion
                 )
                 for i in range(num_layers)
             ]

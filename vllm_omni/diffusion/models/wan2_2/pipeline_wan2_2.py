@@ -155,6 +155,8 @@ def create_transformer_from_config(config: dict, quant_config=None) -> WanTransf
         kwargs["rope_max_seq_len"] = config["rope_max_seq_len"]
     if "pos_embed_seq_len" in config:
         kwargs["pos_embed_seq_len"] = config["pos_embed_seq_len"]
+    if "use_fp8_adaln_fusion" in config:
+        kwargs["use_fp8_adaln_fusion"] = config["use_fp8_adaln_fusion"]
 
     return WanTransformer3DModel(**kwargs)
 

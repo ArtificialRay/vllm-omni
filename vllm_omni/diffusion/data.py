@@ -512,6 +512,9 @@ class OmniDiffusionConfig:
     # Maximum number of sequences to generate in a batch
     max_num_seqs: int = 1
 
+    # kernel fusion settings
+    use_fp8_adaln_fusion: bool = False
+
     @property
     def is_moe(self) -> bool:
         num_experts = self.tf_model_config.get("num_experts", None)

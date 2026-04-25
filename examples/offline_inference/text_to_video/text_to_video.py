@@ -174,6 +174,11 @@ def parse_args() -> argparse.Namespace:
         help="Enable expert parallelism for MoE layers.",
     )
     parser.add_argument(
+        "--use-fp8-adaln-fusion",
+        action="store_true",
+        help="Enable FP8 AdaLN fusion for MoE layers.",
+    )
+    parser.add_argument(
         "--enable-diffusion-pipeline-profiler",
         action="store_true",
         help="Enable diffusion pipeline profiler to display stage durations.",
@@ -239,6 +244,7 @@ def main():
         cache_backend=args.cache_backend,
         cache_config=cache_config,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
+        use_fp8_adaln_fusion=args.use_fp8_adaln_fusion,
     )
     if args.boundary_ratio is not None:
         omni_kwargs["boundary_ratio"] = args.boundary_ratio
