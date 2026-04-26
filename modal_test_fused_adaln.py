@@ -42,10 +42,25 @@ def run_tests() -> int:
     return result.returncode
 
 
+@app.function(image=image, gpu="H100", timeout=900)
+def run_benchmark() -> int:
+    import subprocess
+
+    result = subprocess.run(
+        ["python", "benchmarks/bench_fused_adaln_fp8.py"],
+        cwd="/workspace",
+        env={"PYTHONPATH": "/workspace", "PATH": "/usr/local/bin:/usr/bin:/bin"},
+    )
+    return result.returncode
+
+
 @app.local_entrypoint()
-def main() -> None:
-    returncode = run_tests.remote()
+def main(mode: str = "test") -> None:
+    """mode: 'test' (default) or 'bench'."""
+    if mode == "bench":
+        returncode = run_benchmark.remote()
+    else:
+        returncode = run_tests.remote()
     if returncode != 0:
-        print(f"\nTests failed (exit code {returncode})")
+        print(f"\nExit code {returncode}")
         sys.exit(returncode)
-    print("\nAll tests passed!")
