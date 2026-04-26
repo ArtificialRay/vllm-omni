@@ -23,12 +23,11 @@ class AdaLayerNorm(CustomOp):
         out = layernorm(x) * (1 + scale) + shift
     """
 
-    def __init__(self, hidden_size: int, elementwise_affine: bool = False, eps: float = 1e-6, return_fp8: bool = False) -> None:
+    def __init__(self, hidden_size: int, elementwise_affine: bool = False, eps: float = 1e-6) -> None:
         super().__init__()
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         self.hidden_size = hidden_size
-        self.return_fp8 = return_fp8
         self.layernorm = LayerNorm(self.hidden_size, elementwise_affine=self.elementwise_affine, eps=self.eps)
         
 
@@ -37,19 +36,7 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
-        input_scale: torch.Tensor | None = None 
     ) -> torch.Tensor:
-        if self.return_fp8:
-            from vllm_omni.diffusion.layers.fused_adaln_fp8 import fused_adaln_fp8
-            logger.info_once(f"Running fused AdaLayerNorm in FP8 mode with input scale {input_scale}, shape {input_scale.shape}")
-            # scale and shift should broadcast to the same size of x
-            orig_shape = x.shape
-            D = orig_shape[-1]
-            x = x.view(-1, D)
-            scale = (1+scale).expand(orig_shape).contiguous().view(-1, D)
-            shift = shift.expand(orig_shape).contiguous().view(-1, D)
-            output,_ = fused_adaln_fp8(x,scale,shift,self.eps,input_scale)
-            return output
         return self.forward_native(x, scale, shift)
 
     def forward_hip(
@@ -57,7 +44,6 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
-        input_scale: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.forward_native(x, scale, shift)
 
@@ -66,7 +52,6 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
-        input_scale: torch.Tensor | None = None
     ) -> torch.Tensor:
         if _HAS_MINDIESD:
             try:
@@ -91,7 +76,6 @@ class AdaLayerNorm(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor,
         shift: torch.Tensor,
-        input_scale: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.forward_native(x, scale, shift)
 

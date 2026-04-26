@@ -5,7 +5,8 @@ Two layers of registration:
 
 * ``torch.ops.vllm.fuse_fp8_adalayernorm`` — registered via
   :func:`direct_register_custom_op`, opaque to ``torch._dynamo`` so the inner
-  Triton kernel launch is hidden from ``torch.compile`` / CUDA-graph capture.
+  Triton kernel launch is hidden from ``torch.compile`` 
+  but the kernel is still catched by CUDA-graph.
 * :class:`FuseFP8AdaLayerNorm` — registered via
   ``@CustomOp.register("fuse_fp8_adalayernorm")`` so it joins vLLM's
   ``op_registry`` (enables OOT replacement).
@@ -102,15 +103,6 @@ class FuseFP8AdaLayerNorm(CustomOp):
             x, scale, shift, input_scale, self.eps
         )
 
-    def forward_cuda(
-        self,
-        x: torch.Tensor,
-        scale: torch.Tensor,
-        shift: torch.Tensor,
-        input_scale: torch.Tensor,
-    ) -> torch.Tensor:
-        return fuse_fp8_adalayernorm_impl(x, scale, shift, input_scale, self.eps)
-
     def forward_native(
         self,
         x: torch.Tensor,
@@ -120,7 +112,7 @@ class FuseFP8AdaLayerNorm(CustomOp):
     ) -> torch.Tensor:
         y = self.layernorm(x) * (1 + scale) + shift
         return (
-            (y.float() / input_scale)
+            (y.float() * (1.0/input_scale))
             .clamp(_FP8_MIN, _FP8_MAX)
             .to(_FP8_DTYPE)
         )

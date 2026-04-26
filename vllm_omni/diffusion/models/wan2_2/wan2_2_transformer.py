@@ -30,6 +30,7 @@ from vllm_omni.diffusion.distributed.sp_plan import (
 )
 from vllm_omni.diffusion.forward_context import get_forward_context
 from vllm_omni.diffusion.layers.adalayernorm import AdaLayerNorm
+from vllm_omni.diffusion.layers.fuse_fp8_adalayernorm import FuseFP8AdaLayerNorm
 from vllm_omni.diffusion.layers.norm import LayerNorm, RMSNorm
 from vllm_omni.platforms import current_omni_platform
 
@@ -715,7 +716,10 @@ class WanTransformerBlock(nn.Module):
         head_dim = dim // num_heads
         self._use_fp8_adaln_fusion = use_fp8_adaln_fusion
         # 1. Self-attention
-        self.norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps,return_fp8=self._use_fp8_adaln_fusion)
+        if self._use_fp8_adaln_fusion:
+            self.norm1 = FuseFP8AdaLayerNorm(dim,elementwise_affine=False,eps=eps)
+        else:
+            self.norm1 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
         self.attn1 = WanSelfAttention(
             dim=dim,
             num_heads=num_heads,
@@ -742,7 +746,7 @@ class WanTransformerBlock(nn.Module):
         self.ffn = WanFeedForward(
             dim=dim, inner_dim=ffn_dim, dim_out=dim, quant_config=quant_config, prefix=f"{prefix}.ffn",use_fp8_adaln_fusion=use_fp8_adaln_fusion,
         )
-        self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps, return_fp8=self._use_fp8_adaln_fusion)
+        self.norm3 = AdaLayerNorm(dim, elementwise_affine=False, eps=eps)
 
         # Scale-shift table for modulation
         self.scale_shift_table = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
