@@ -174,7 +174,7 @@ class WanFeedForward(nn.Module):
             logger.info_once(f"apply scaled mm directly in {self.net_0.proj} with input scale {self.net_0.proj.input_scale}")
             proj = self.net_0.proj
             x_2d = hidden_states.view(-1, hidden_states.shape[-1])
-            output_shape = [*hidden_states.shape[:-1], proj.weight.shape[0]]
+            output_shape = [*hidden_states.shape[:-1], proj.weight.shape[1]]
             x_after_proj = proj.quant_method.fp8_linear.apply_scaled_mm(
                 A=x_2d,
                 B=proj.weight,
@@ -462,7 +462,7 @@ class WanSelfAttention(nn.Module):
             # input is already in FP8, skip preparation
             logger.info_once(f"apply scaled mm directly in {self.to_qkv} with input scale {self.to_qkv.input_scale}")
             x_2d = hidden_states.view(-1, hidden_states.shape[-1])
-            output_shape = [*hidden_states.shape[:-1], self.to_qkv.weight.shape[0]]
+            output_shape = [*hidden_states.shape[:-1], self.to_qkv.weight.shape[1]]
             qkv = self.to_qkv.quant_method.fp8_linear.apply_scaled_mm(
                 A=x_2d,
                 B=self.to_qkv.weight,
