@@ -75,26 +75,23 @@ def _make(N: int, D: int, *, seed: int = 0, device: str = "cuda"):
 
 
 @pytest.mark.parametrize(
-    "N,D",
+    "N,D,input_scale",
     [
-        (1, 128),       # tiny
-        (4, 3072),      # Wan 2.2 hidden dim, small batch
-        (128, 3072),    # realistic token count
-        (1024, 5120),   # larger hidden, many tokens
-        (7, 130),       # non-power-of-2 D to exercise masking
+        (1, 128,0.5),       # tiny
+        (4, 3072,0.5),      # Wan 2.2 hidden dim, small batch
+        (128, 3072,0.4),    # realistic token count
+        (1024, 5120,0.4),   # larger hidden, many tokens
+        (7, 130,0.6),       # non-power-of-2 D to exercise masking
     ],
 )
-def test_per_token_matches_reference(N: int, D: int):
+def test_per_token_matches_reference(N: int, D: int, input_scale: float):
     fused_adaln_fp8, fused_adaln_fp8_reference, *_ = _load()
     x, s, b = _make(N, D)
-
-    y_k, sc_k = fused_adaln_fp8(x, s, b)
-    y_r, sc_r = fused_adaln_fp8_reference(x, s, b)
+    input_scale = torch.tensor(input_scale, device=x.device, dtype=torch.float32)
+    y_k= fused_adaln_fp8(x, s, b, input_scale=input_scale)
+    y_r= fused_adaln_fp8_reference(x, s, b, input_scale=input_scale)
 
     assert y_k.shape == (N, D) and y_k.dtype == torch.float8_e4m3fn
-    assert sc_k.shape == (N,) and sc_k.dtype == torch.float32
-    # Scales agree to fp32 tolerance (reduction-order noise between Triton and PyTorch).
-    torch.testing.assert_close(sc_k, sc_r, rtol=1e-5, atol=1e-7)
     # Quantized tiles may differ by at most 1 fp8 level on a small fraction
     # of near-boundary elements when the scale drifts by ~1 ULP.
     _assert_fp8_tiles_close(y_k, y_r, max_mismatch_frac=0.02)
@@ -106,9 +103,9 @@ def test_per_token_zero_row_eps_floor():
     x = torch.zeros(2, 128, device="cuda", dtype=torch.bfloat16)
     s = torch.ones_like(x)
     b = torch.zeros_like(x)
+    input_scale = torch.ones((1,),device=x.device,dtype=torch.float32)
 
-    y, sc = fused_adaln_fp8(x, s, b)
-    assert torch.isfinite(sc).all() and (sc > 0).all(), "scale should be eps-floored, not 0/nan"
+    y = fused_adaln_fp8(x, s, b,input_scale=input_scale)
     assert torch.isfinite(y.float()).all(), "output should be finite (no inf from div-by-zero)"
 
 
@@ -117,8 +114,8 @@ def test_per_token_dequant_roundtrip():
     fused_adaln_fp8, fused_adaln_fp8_reference, *_ = _load()
     N, D = 32, 3072
     x, s, b = _make(N, D)
-
-    y_k, sc_k = fused_adaln_fp8(x, s, b)
+    input_scale = torch.rand((1,),device=x.device,dtype=torch.float32)
+    y_k = fused_adaln_fp8(x, s, b,input_scale=input_scale)
     # Load _adaln_fp32 via the same importlib path as _load() to avoid
     # triggering vllm_omni package init.
     import importlib.util
@@ -131,7 +128,7 @@ def test_per_token_dequant_roundtrip():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     y_true = mod._adaln_fp32(x, s, b, eps=1e-6)            # [N, D] fp32
-    y_dq = y_k.float() * sc_k.unsqueeze(-1)                # dequantized
+    y_dq = y_k.float() * input_scale.unsqueeze(-1)                # dequantized
     # FP8 e4m3 gives ~2-3 bits of mantissa; expect ~4% relative error on non-tiny values.
     rel_err = (y_dq - y_true).abs() / y_true.abs().clamp_min(1e-3)
     assert rel_err.median().item() < 0.08, f"median rel err {rel_err.median().item()}"

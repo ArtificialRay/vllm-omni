@@ -45,7 +45,7 @@ def _fused_adaln_fp8_per_token_kernel(
     stride_shift_d,             # how much to increase SHIFT_ptr when moving by 1 column
     stride_y_n,                 # how much to increase Y_ptr when moving by 1 row
     stride_y_d,                 # how much to increase Y_ptr when moving by 1 column
-    input_scale,                # input scale for pre-tensor quant
+    INPUT_SCALE_ptr,                # input scale for pre-tensor quant
     D: tl.constexpr,            # number of columns in X (hidden dim) -- the reduction axis
     EPS: tl.constexpr,          # epsilon added to variance to avoid division by zero
     FP8_MIN: tl.constexpr,      # lower clamp bound (-448.0 for e4m3fn, -224.0 for e4m3fnuz)
@@ -70,10 +70,6 @@ def _fused_adaln_fp8_per_token_kernel(
     """
     # One program per row. BLOCK_SIZE = next_power_of_2(D), so the whole
     # row fits in a single tile -- no streaming loop needed.
-    # DEBUG: if this fused kernel really runs
-    if not hasattr(fused_adaln_fp8,"_fired"):
-        logger.info("Fused AdaLN+FP8 kernel fired for the first time!")
-        fused_adaln_fp8._fired = True
     row = tl.program_id(0).to(tl.int64)
     X_ptr += row * stride_x_n
     SCALE_ptr += row * stride_scale_n
@@ -105,7 +101,9 @@ def _fused_adaln_fp8_per_token_kernel(
 
     # 4. Clamp then cast -- clamp guards against values that round up past
     #    FP8_MAX and would otherwise become +inf in the fp8 cast.
-    y_q = tl.clamp(y / input_scale, FP8_MIN, FP8_MAX).to(Y_ptr.dtype.element_ty)
+    input_scale = tl.load(INPUT_SCALE_ptr).to(tl.float32)
+    input_scale = 1.0 / input_scale
+    y_q = tl.clamp(y * input_scale, FP8_MIN, FP8_MAX).to(Y_ptr.dtype.element_ty)
 
     # 6. Store quantized row + per-token scale.
     tl.store(Y_ptr + cols, y_q, mask=mask)
@@ -235,10 +233,10 @@ def fused_adaln_fp8(
         scale.stride(0), scale.stride(1),
         shift.stride(0), shift.stride(1),
         x_fp8.stride(0), x_fp8.stride(1),
+        INPUT_SCALE_ptr=input_scale,
         D=D, EPS=eps,
         FP8_MIN=FP8_MIN, FP8_MAX=FP8_MAX,
         BLOCK_SIZE=BLOCK_SIZE,
-        input_scale=input_scale,
         num_warps=num_warps,
     )
     return x_fp8
@@ -295,7 +293,7 @@ def fused_adaln_fp8_per_group(
     )
     return x_fp8, x_scale
 
-
+# will remove pytorch reference in the final shift
 # ──────────────────────────────────────────────────────────────────────────
 # PyTorch reference implementations (for unit tests / debugging)
 # ──────────────────────────────────────────────────────────────────────────
@@ -306,17 +304,16 @@ def fused_adaln_fp8_reference(
     scale: torch.Tensor,
     shift: torch.Tensor,
     eps: float = 1e-6,
+    input_scale: torch.Tensor = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Ground truth for ``fused_adaln_fp8`` (per-token).
 
     Uses the same eps-floor and clamp-before-cast semantics as the Triton kernel
     so the unit test can compare bit-for-bit at boundaries.
     """
-    y = _adaln_fp32(x, scale, shift, eps)                       # [N, D] fp32
-    absmax = torch.clamp(y.abs().amax(-1), min=eps)             # [N]    eps-floor
-    s = absmax / FP8_MAX
-    y_q = torch.clamp(y / s.unsqueeze(-1), FP8_MIN, FP8_MAX).to(_FP8_DTYPE)
-    return y_q, s.float()
+    y = _adaln_fp32(x, scale, shift, eps)                       # [N, D] fp32          # [N]    eps-floor
+    y_q = torch.clamp(y * (1/ input_scale), FP8_MIN, FP8_MAX).to(_FP8_DTYPE)
+    return y_q
 
 
 def fused_adaln_fp8_per_group_reference(
@@ -348,10 +345,15 @@ def _adaln_fp32(
     x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, eps: float
 ) -> torch.Tensor:
     """LayerNorm + affine in fp32. ``scale`` is already ``(1 + scale_msa)``."""
-    x_f32 = x.float()
-    mean = x_f32.mean(-1, keepdim=True)
-    var = x_f32.var(-1, keepdim=True, unbiased=False)
-    x_norm = (x_f32 - mean) * torch.rsqrt(var + eps)
+    import torch.nn.functional as F
+    x_norm =F.layer_norm(
+        x.float(), normalized_shape=x.shape[-1:], 
+        eps=eps
+    )
+    # x_f32 = x.float()
+    # mean = x_f32.mean(-1, keepdim=True)
+    # var = x_f32.var(-1, keepdim=True, unbiased=False)
+    # x_norm = (x_f32 - mean) * torch.rsqrt(var + eps)
     return x_norm * scale.float() + shift.float()
 
 

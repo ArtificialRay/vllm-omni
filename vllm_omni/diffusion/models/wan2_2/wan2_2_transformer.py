@@ -776,7 +776,7 @@ class WanTransformerBlock(nn.Module):
             input_scale = self.attn1.to_qkv.input_scale.data
             logger.info_once(f"Using FP8 AdaLN fusion in {self.attn1.__class__.__name__} with scale {input_scale}")
             #assert input_scale.size() == (1,) # Debug checkpoint
-            norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa, input_scale).type_as(hidden_states)
+            norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa, input_scale)
         else:
             norm_hidden_states = self.norm1(hidden_states, scale_msa, shift_msa).type_as(hidden_states)
         attn_output = self.attn1(norm_hidden_states, rotary_emb, hidden_states_mask)
@@ -791,7 +791,7 @@ class WanTransformerBlock(nn.Module):
         if self._use_fp8_adaln_fusion:
             input_scale = self.ffn.net_0.proj.input_scale.data
             logger.info_once(f"Using FP8 AdaLN fusion in {self.ffn.net_0.proj.__class__.__name__} with scale {input_scale}")
-            norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa, input_scale).type_as(hidden_states)
+            norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa, input_scale)
         else:
             norm_hidden_states = self.norm3(hidden_states, c_scale_msa, c_shift_msa).type_as(hidden_states)
         ff_output = self.ffn(norm_hidden_states)
