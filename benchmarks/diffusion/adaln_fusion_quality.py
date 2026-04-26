@@ -20,7 +20,7 @@ and sampling params, and reports:
   the fused kernel does not silently change outputs)
 
 Example:
-    python benchmarks/diffusion/wan22_fp8_adaln_fusion_compare.py \\
+    python benchmarks/diffusion/adaln_fusion_quality.py \\
         --model ./wan22-ti2v-modelopt-fp8 \\
         --prompts \\
             "A serene lakeside sunrise with mist over the water." \\

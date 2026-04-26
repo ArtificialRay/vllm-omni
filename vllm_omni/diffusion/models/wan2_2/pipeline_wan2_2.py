@@ -338,7 +338,9 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
         self.vae = DistributedAutoencoderKLWan.from_pretrained(
             model, subfolder="vae", torch_dtype=dtype, local_files_only=local_files_only
         ).to(self.device)
-
+        # log if adaln fusion opened
+        if od_config.use_fp8_adaln_fusion:
+            logger.info("Using FP8 AdaLN fusion for wan2-2")
         # Initialize transformers with correct config (weights loaded via load_weights)
         if load_transformer:
             transformer_config = load_transformer_config(model, "transformer", local_files_only)
