@@ -14,7 +14,7 @@ import torch
 import triton
 
 _HERE = pathlib.Path(__file__).resolve()
-_KERNEL = _HERE.parents[1] / "vllm_omni" / "diffusion" / "layers" / "fused_adaln_fp8.py"
+_KERNEL = _HERE.parents[2] / "vllm_omni" / "diffusion" / "layers" / "fused_adaln_fp8.py"
 _spec = importlib.util.spec_from_file_location("fused_adaln_fp8", _KERNEL)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
