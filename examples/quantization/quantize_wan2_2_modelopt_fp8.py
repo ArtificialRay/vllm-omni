@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Quantize Wan2.2 (TI2V-5B, 704x1280 T2V) to a ModelOpt FP8 Hugging Face checkpoint.
+"""Quantize Wan2.2 to a ModelOpt FP8 Hugging Face checkpoint.
 
-Calibrates the DiT transformer using a small video prompt set and exports a
-diffusers-style directory whose transformer carries ModelOpt FP8 metadata.
+Calibrates the DiT transformer(s) using a small video prompt set and exports a
+diffusers-style directory whose transformer(s) carry ModelOpt FP8 metadata.
 The exported checkpoint is consumable by vllm-omni's ModelOpt FP8 adapter
 (see vllm_omni/diffusion/model_loader/checkpoint_adapters/modelopt_fp8.py).
 
@@ -14,8 +14,17 @@ norm + proj_out, and sequence-parallel helpers. All attention + FFN linears
 are quantized — static calibration handles the numerics that online FP8
 couldn't (see #2920 ablation).
 
-Default target is `Wan-AI/Wan2.2-TI2V-5B-Diffusers`, the dense 5B variant that
-fits 80GB BF16. The A14B MoE variants need 2+ GPUs and are out of scope here.
+Supported targets:
+- `Wan-AI/Wan2.2-TI2V-5B-Diffusers` (single-transformer, 80GB BF16 fits one GPU)
+- `Wan-AI/Wan2.2-T2V-A14B-Diffusers` (MoE, two transformers, needs 2+ GPUs BF16)
+- `Wan-AI/Wan2.2-I2V-A14B-Diffusers` (MoE, two transformers, needs 2+ GPUs BF16)
+
+For MoE A14B variants the diffusers pipeline routes between `transformer` (high
+noise, t >= boundary_timestep) and `transformer_2` (low noise) automatically
+based on `boundary_ratio` from `model_index.json`. A single calibration run
+collects amax statistics for both via timestep-conditioned forward passes.
+
+TODO: To quantize A14B model, maybe setup --calib-steps = 40
 
 Example:
     python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
@@ -92,6 +101,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-block weight quantization as 'M,N' (e.g. '128,128'). Default per-tensor. "
         "Note: vllm-omni's ModelOpt adapter may not yet dispatch block-wise scales — check #2924 "
         "for the HV-1.5 investigation status before relying on this.",
+    )
+    p.add_argument(
+        "--boundary-ratio",
+        type=float,
+        default=None,
+        help="Override boundary_ratio for Wan2.2 MoE pipelines. If unset (default), the "
+        "value from the model's model_index.json is used (A14B ships with 0.875). Only "
+        "applied when the loaded pipeline has transformer_2.",
     )
     p.add_argument("--overwrite", action="store_true", help="Replace an existing output directory.")
     return p
@@ -174,11 +191,72 @@ def _disable_known_problematic_quantizers(mtq: Any, backbone: torch.nn.Module, *
         mtq.disable_quantizer(backbone, _mha_filter_func)
 
 
-def _load_pipeline(model_path: str, dtype: torch.dtype) -> DiffusionPipeline:
+def _move_tensor(value: Any, device: torch.device) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, (tuple, list)):
+        moved = [_move_tensor(v, device) for v in value]
+        return type(value)(moved)
+    return value
+
+
+def _make_input_device_hook(target_device: torch.device):
+    """Pre-hook that moves all tensor args/kwargs onto the module's device."""
+
+    def pre_hook(_module, args, kwargs):
+        new_args = tuple(_move_tensor(a, target_device) for a in args)
+        new_kwargs = {k: _move_tensor(v, target_device) for k, v in kwargs.items()}
+        return new_args, new_kwargs
+
+    return pre_hook
+
+
+def _make_output_device_hook(primary_device: torch.device):
+    """Post-hook that moves outputs back to the pipeline's primary device."""
+
+    def post_hook(_module, _args, output):
+        return _move_tensor(output, primary_device)
+
+    return post_hook
+
+
+def _load_pipeline(
+    model_path: str,
+    dtype: torch.dtype,
+    boundary_ratio: float | None = None,
+) -> DiffusionPipeline:
     pipe = DiffusionPipeline.from_pretrained(model_path, torch_dtype=dtype)
     if hasattr(pipe, "set_progress_bar_config"):
         pipe.set_progress_bar_config(disable=True)
-    pipe.to("cuda")
+
+    transformer_2 = getattr(pipe, "transformer_2", None)
+    if boundary_ratio is not None and transformer_2 is not None:
+        # diffusers WanPipeline reads self.config.boundary_ratio inside __call__ to
+        # decide the boundary_timestep cutoff; register_to_config is the official
+        # ConfigMixin escape hatch for overriding without re-instantiating.
+        previous = pipe.config.get("boundary_ratio")
+        pipe.register_to_config(boundary_ratio=boundary_ratio)
+        print(f"  override:        boundary_ratio={boundary_ratio} (was {previous})")
+
+    if transformer_2 is not None and torch.cuda.device_count() >= 2:
+        # diffusers' WanPipeline routes between the two by boundary_timestep but does
+        # NOT transfer activations across devices, so this case bridge transformer_2 with
+        # forward hooks: pre-hook moves inputs cuda:0 -> cuda:1, post-hook moves
+        # outputs back cuda:1 -> cuda:0. The pipeline then sees a uniform cuda:0
+        # state and scheduler.step works without modification.
+        primary = torch.device("cuda:0")
+        secondary = torch.device("cuda:1")
+        pipe.transformer.to(primary)
+        transformer_2.to(secondary)
+        for component_name in ("text_encoder", "vae", "image_encoder"):
+            component = getattr(pipe, component_name, None)
+            if component is not None:
+                component.to(primary)
+        transformer_2.register_forward_pre_hook(_make_input_device_hook(secondary), with_kwargs=True)
+        transformer_2.register_forward_hook(_make_output_device_hook(primary))
+        print(f"  device map:      transformer={primary}, transformer_2={secondary} (cross-device hooks installed)")
+    else:
+        pipe.to("cuda")
     return pipe
 
 
@@ -217,8 +295,8 @@ def _build_forward_loop(pipe: DiffusionPipeline, args: argparse.Namespace, promp
     return forward_loop
 
 
-def _summarize_export(output_dir: Path) -> None:
-    cfg_path = output_dir / "transformer" / "config.json"
+def _summarize_export(output_dir: Path, subfolder: str = "transformer") -> None:
+    cfg_path = output_dir / subfolder / "config.json"
     if not cfg_path.exists():
         print(f"[warn] {cfg_path} missing.", file=sys.stderr)
         return
@@ -226,9 +304,9 @@ def _summarize_export(output_dir: Path) -> None:
         cfg = json.load(f)
     qc = cfg.get("quantization_config")
     if not isinstance(qc, dict):
-        print("[warn] No quantization_config in transformer/config.json.", file=sys.stderr)
+        print(f"[warn] No quantization_config in {subfolder}/config.json.", file=sys.stderr)
         return
-    print("Export summary:")
+    print(f"Export summary ({subfolder}):")
     print(f"  quant_method: {qc.get('quant_method')}")
     print(f"  quant_algo:   {qc.get('quant_algo')}")
     producer = qc.get("producer")
@@ -301,10 +379,18 @@ def _wan22_quant_config_block(weight_block_size: list[int] | None = None) -> dic
     }
 
 
-def _patch_quant_config(output_dir: Path, weight_block_size: list[int] | None = None) -> None:
-    """Inject quant_algo: FP8 + config_groups into transformer/config.json so
-    vllm-omni's adapter (#2913) recognises the checkpoint as ModelOpt FP8."""
-    cfg_path = output_dir / "transformer" / "config.json"
+def _patch_quant_config(
+    output_dir: Path,
+    subfolder: str = "transformer",
+    weight_block_size: list[int] | None = None,
+) -> None:
+    """Inject quant_algo: FP8 + config_groups into <subfolder>/config.json so
+    vllm-omni's adapter (#2913) recognises the checkpoint as ModelOpt FP8.
+
+    For Wan2.2 MoE (T2V/I2V-A14B), call once per transformer subfolder
+    (`transformer` and `transformer_2`).
+    """
+    cfg_path = output_dir / subfolder / "config.json"
     with cfg_path.open(encoding="utf-8") as f:
         cfg = json.load(f)
 
@@ -320,13 +406,17 @@ def _patch_quant_config(output_dir: Path, weight_block_size: list[int] | None = 
         json.dump(cfg, f, indent=2)
 
 
-def _save_pipeline_with_fp8_transformer(
+def _save_pipeline_with_fp8_transformers(
     pipe: DiffusionPipeline,
     model_path: str,
     output_dir: Path,
     max_shard_size: str = "5GB",
 ) -> None:
-    """Copy source dir verbatim minus transformer/, then save the quantized transformer."""
+    """Copy source dir verbatim minus transformer/(_2), then save quantized transformer(s).
+
+    For Wan2.2 MoE (T2V/I2V-A14B), `pipe.transformer_2` is also saved into the
+    `transformer_2/` subfolder. Single-transformer variants (TI2V-5B) skip it.
+    """
     from modelopt.torch.export.diffusers_utils import hide_quantizers_from_state_dict
 
     src = Path(model_path)
@@ -339,14 +429,54 @@ def _save_pipeline_with_fp8_transformer(
         shutil.rmtree(output_dir)
     shutil.copytree(src, output_dir, ignore=shutil.ignore_patterns("transformer", "transformer_2"))
 
-    transformer_out = output_dir / "transformer"
-    # Pass the nn.Module (transformer), not the Pipeline wrapper.
-    with hide_quantizers_from_state_dict(pipe.transformer):
-        pipe.transformer.save_pretrained(
-            str(transformer_out),
-            safe_serialization=True,
-            max_shard_size=max_shard_size,
+    backbones: list[tuple[str, torch.nn.Module]] = [("transformer", pipe.transformer)]
+    transformer_2 = getattr(pipe, "transformer_2", None)
+    if transformer_2 is not None:
+        backbones.append(("transformer_2", transformer_2))
+
+    for subfolder, backbone in backbones:
+        out = output_dir / subfolder
+        with hide_quantizers_from_state_dict(backbone):
+            backbone.save_pretrained(
+                str(out),
+                safe_serialization=True,
+                max_shard_size=max_shard_size,
+            )
+
+
+def _calibrate_and_force_export(
+    backbone: torch.nn.Module,
+    label: str,
+    *,
+    mtq: Any,
+    quant_config: dict,
+    forward_loop,
+    quantize_mha: bool,
+    dtype: torch.dtype,
+) -> torch.nn.Module:
+    """Calibrate one transformer backbone and force FP8 weight serialization.
+
+    Returns the (possibly replaced) backbone module so the caller can rebind
+    `pipe.transformer` / `pipe.transformer_2` to the wrapped instance.
+    """
+    print(f"\nCalibrating {label}...")
+    quantized = mtq.quantize(backbone, quant_config, forward_loop)
+    if quantized is not None:
+        backbone = quantized
+
+    _disable_known_problematic_quantizers(mtq, backbone, quantize_mha=quantize_mha)
+
+    print(f"\nForcing FP8 weight serialization for {label} (Wan2.2 isn't in ModelOpt's")
+    print("recognized-model registry, so we call the per-weight export helper ourselves)...")
+    exported = _force_export_quantized_weights(backbone, dtype)
+    print(f"  -> {exported} weights converted to FP8 in {label}")
+    if exported == 0:
+        raise SystemExit(
+            f"No quantized weights were exported in {label}. Calibration may have skipped every "
+            "layer (check the disable_quantizer regex) or `mtq.quantize` did not actually wrap "
+            "any weight quantizers."
         )
+    return backbone
 
 
 def main() -> None:
@@ -373,8 +503,10 @@ def main() -> None:
         f"  weight strategy: {'block-wise ' + str(weight_block_size) if weight_block_size else 'per-tensor (default)'}"
     )
 
-    pipe = _load_pipeline(model_path, dtype)
-    backbone = pipe.transformer
+    pipe = _load_pipeline(model_path, dtype, boundary_ratio=args.boundary_ratio)
+    is_dual = getattr(pipe, "transformer_2", None) is not None
+    if is_dual:
+        print("  detected MoE A14B variant (transformer + transformer_2)")
 
     quant_config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
     if weight_block_size is not None:
@@ -388,29 +520,41 @@ def main() -> None:
         )
 
     forward_loop = _build_forward_loop(pipe, args, prompts)
-    quantized = mtq.quantize(backbone, quant_config, forward_loop)
-    if quantized is not None:
-        pipe.transformer = quantized
-        backbone = quantized
 
-    _disable_known_problematic_quantizers(mtq, backbone, quantize_mha=args.quantize_mha)
-
-    print("\nForcing FP8 weight serialization (Wan2.2 isn't in ModelOpt's recognized-model registry,")
-    print("so we have to call the per-weight export helper ourselves)...")
-    exported = _force_export_quantized_weights(backbone, dtype)
-    print(f"  -> {exported} weights converted to FP8 in memory")
-    if exported == 0:
-        raise SystemExit(
-            "No quantized weights were exported. Calibration may have skipped every layer "
-            "(check the disable_quantizer regex) or `mtq.quantize` did not actually wrap any "
-            "weight quantizers."
+    # Single-transformer (TI2V-5B) does one pass; MoE A14B variants do two.
+    # The diffusers Wan22 pipeline routes between transformer (high noise) and
+    # transformer_2 (low noise) by boundary_timestep, so each forward_loop run
+    # exercises the backbone currently being calibrated. mtq.quantize wraps
+    # quantizers and then drives the forward_loop to collect amax statistics.
+    pipe.transformer = _calibrate_and_force_export(
+        pipe.transformer,
+        "transformer",
+        mtq=mtq,
+        quant_config=quant_config,
+        forward_loop=forward_loop,
+        quantize_mha=args.quantize_mha,
+        dtype=dtype,
+    )
+    if is_dual:
+        pipe.transformer_2 = _calibrate_and_force_export(
+            pipe.transformer_2,
+            "transformer_2",
+            mtq=mtq,
+            quant_config=quant_config,
+            forward_loop=forward_loop,
+            quantize_mha=args.quantize_mha,
+            dtype=dtype,
         )
 
-    print("\nSaving pipeline with FP8 transformer...")
-    _save_pipeline_with_fp8_transformer(pipe, model_path, output_dir)
-    _patch_quant_config(output_dir, weight_block_size=weight_block_size)
+    print("\nSaving pipeline with FP8 transformer(s)...")
+    _save_pipeline_with_fp8_transformers(pipe, model_path, output_dir)
+    _patch_quant_config(output_dir, subfolder="transformer", weight_block_size=weight_block_size)
+    if is_dual:
+        _patch_quant_config(output_dir, subfolder="transformer_2", weight_block_size=weight_block_size)
     print(f"Saved to: {output_dir}")
-    _summarize_export(output_dir)
+    _summarize_export(output_dir, subfolder="transformer")
+    if is_dual:
+        _summarize_export(output_dir, subfolder="transformer_2")
 
     print("\nNext: validate the checkpoint with vllm-omni:")
     print(
