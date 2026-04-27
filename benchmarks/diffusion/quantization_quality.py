@@ -34,6 +34,19 @@ Video example (text-to-video):
         --height 720 --width 1280 \
         --num-frames 81 --num-inference-steps 40 --seed 42
 
+Video example (text-to-video) with offline quant:
+    python benchmarks/diffusion/quantization_quality.py \
+        --use-offline-quant \
+        --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+        --model-quant-checkpoint vllm-omni/Wan2.2-T2V-A14B-Diffusers\
+        --task t2v \
+        --quantization fp8 \
+        --prompts \
+            "A serene lakeside sunrise with mist over the water" \
+            "A cat walking across a wooden bridge in autumn" \
+        --height 720 --width 1280 \
+        --num-frames 81 --num-inference-steps 40 --seed 42
+
 Multiple quantization methods:
     python benchmarks/diffusion/quantization_quality.py \
         --model Tongyi-MAI/Z-Image-Turbo \
@@ -135,13 +148,20 @@ def _build_omni_kwargs(args, quantization=None):
         ring_degree=args.ring_degree,
         tensor_parallel_size=args.tensor_parallel_size,
     )
-    kwargs = {
-        "model": args.model,
-        "parallel_config": parallel_config,
-        "enforce_eager": args.enforce_eager,
-    }
     if quantization:
-        kwargs["quantization_config"] = quantization
+        kwargs = {
+            "model": args.model_quant_checkpoint if args.use_offline_quant else args.model,
+            "parallel_config": parallel_config,
+            "enforce_eager": args.enforce_eager,
+            "quantization_config":quantization
+        }
+    else:
+        kwargs = {
+            "model": args.model,
+            "parallel_config": parallel_config,
+            "enforce_eager": args.enforce_eager,
+        }
+    
     return kwargs
 
 
@@ -353,8 +373,9 @@ def run_benchmark(args):
     print("=" * 80)
 
     # Summary table
+    model = args.model_quant_checkpoint if args.use_offline_quant else args.model
     lines = []
-    lines.append(f"## Quantization Quality Benchmark — {args.model.split('/')[-1]}")
+    lines.append(f"## Quantization Quality Benchmark — {model.split('/')[-1]}")
     lines.append(
         f"Setup: {args.height}x{args.width}, {args.num_inference_steps} steps, "
         f"seed={args.seed}, LPIPS ({args.lpips_net})"
@@ -415,6 +436,8 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model", required=True, help="Model name or local path.")
+    parser.add_argument("--model-quant-checkpoint",default=None, help="Offline quantization model checkpoint")
+    parser.add_argument("--use-offline-quant",action="store_true",help="compare with offline quantized model checkpoint")
     parser.add_argument(
         "--task",
         default="t2i",
@@ -452,7 +475,10 @@ def parse_args():
     parser.add_argument("--ring-degree", type=int, default=1)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.use_offline_quant and not args.model_quant_checkpoint:
+        parser.error("--use-offline-quant requires --model-quant-checkpoint")
+    return args
 
 
 if __name__ == "__main__":

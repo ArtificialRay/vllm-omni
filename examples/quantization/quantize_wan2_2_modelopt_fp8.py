@@ -26,11 +26,17 @@ collects amax statistics for both via timestep-conditioned forward passes.
 
 TODO: To quantize A14B model, maybe setup --calib-steps = 40
 
-Example:
+Example(TI2V-5B):
     python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
         --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \\
         --output ./wan22-ti2v-modelopt-fp8 \\
         --overwrite
+Example(T2V-A14B):
+    python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
+            --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \\
+            --output ./wan22-ti2v-modelopt-fp8 \\
+            --calib-boundary-ratio 0.5 \\
+            --overwrite
 """
 
 from __future__ import annotations
@@ -103,12 +109,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "for the HV-1.5 investigation status before relying on this.",
     )
     p.add_argument(
-        "--boundary-ratio",
+        "--calib-boundary-ratio",
         type=float,
         default=None,
-        help="Override boundary_ratio for Wan2.2 MoE pipelines. If unset (default), the "
-        "value from the model's model_index.json is used (A14B ships with 0.875). Only "
-        "applied when the loaded pipeline has transformer_2.",
+        help="Pass-1-only boundary_ratio override for Wan2.2 MoE calibration. Only takes "
+        "effect when the loaded pipeline has transformer_2. Lowering it (e.g. 0.5) shifts "
+        "more denoising steps onto `transformer` so its quantizers see a richer amax "
+        "sample WITHOUT bumping --calib-steps. Pass 2 always restores the model's "
+        "production boundary_ratio (A14B = 0.875) to keep transformer_2's amax in "
+        "production distribution. If unset, both passes use the production value (default).",
     )
     p.add_argument("--overwrite", action="store_true", help="Replace an existing output directory.")
     return p
@@ -220,24 +229,12 @@ def _make_output_device_hook(primary_device: torch.device):
     return post_hook
 
 
-def _load_pipeline(
-    model_path: str,
-    dtype: torch.dtype,
-    boundary_ratio: float | None = None,
-) -> DiffusionPipeline:
+def _load_pipeline(model_path: str, dtype: torch.dtype) -> DiffusionPipeline:
     pipe = DiffusionPipeline.from_pretrained(model_path, torch_dtype=dtype)
     if hasattr(pipe, "set_progress_bar_config"):
         pipe.set_progress_bar_config(disable=True)
 
     transformer_2 = getattr(pipe, "transformer_2", None)
-    if boundary_ratio is not None and transformer_2 is not None:
-        # diffusers WanPipeline reads self.config.boundary_ratio inside __call__ to
-        # decide the boundary_timestep cutoff; register_to_config is the official
-        # ConfigMixin escape hatch for overriding without re-instantiating.
-        previous = pipe.config.get("boundary_ratio")
-        pipe.register_to_config(boundary_ratio=boundary_ratio)
-        print(f"  override:        boundary_ratio={boundary_ratio} (was {previous})")
-
     if transformer_2 is not None and torch.cuda.device_count() >= 2:
         # diffusers' WanPipeline routes between the two by boundary_timestep but does
         # NOT transfer activations across devices, so this case bridge transformer_2 with
@@ -444,7 +441,7 @@ def _save_pipeline_with_fp8_transformers(
             )
 
 
-def _calibrate_and_force_export(
+def _calibrate(
     backbone: torch.nn.Module,
     label: str,
     *,
@@ -452,20 +449,25 @@ def _calibrate_and_force_export(
     quant_config: dict,
     forward_loop,
     quantize_mha: bool,
-    dtype: torch.dtype,
 ) -> torch.nn.Module:
-    """Calibrate one transformer backbone and force FP8 weight serialization.
+    """Wrap one transformer backbone with quantizers and run calibration.
 
     Returns the (possibly replaced) backbone module so the caller can rebind
-    `pipe.transformer` / `pipe.transformer_2` to the wrapped instance.
+    `pipe.transformer` / `pipe.transformer_2` to the wrapped instance. The
+    backbone's weights remain in their original dtype here — call
+    `_force_export` afterwards to commit FP8 storage. 
     """
     print(f"\nCalibrating {label}...")
     quantized = mtq.quantize(backbone, quant_config, forward_loop)
     if quantized is not None:
         backbone = quantized
-
     _disable_known_problematic_quantizers(mtq, backbone, quantize_mha=quantize_mha)
+    return backbone
 
+
+def _force_export(backbone: torch.nn.Module, label: str, dtype: torch.dtype) -> None:
+    """Convert calibrated weights to actual FP8 storage.
+    """
     print(f"\nForcing FP8 weight serialization for {label} (Wan2.2 isn't in ModelOpt's")
     print("recognized-model registry, so we call the per-weight export helper ourselves)...")
     exported = _force_export_quantized_weights(backbone, dtype)
@@ -476,7 +478,6 @@ def _calibrate_and_force_export(
             "layer (check the disable_quantizer regex) or `mtq.quantize` did not actually wrap "
             "any weight quantizers."
         )
-    return backbone
 
 
 def main() -> None:
@@ -503,10 +504,17 @@ def main() -> None:
         f"  weight strategy: {'block-wise ' + str(weight_block_size) if weight_block_size else 'per-tensor (default)'}"
     )
 
-    pipe = _load_pipeline(model_path, dtype, boundary_ratio=args.boundary_ratio)
+    pipe = _load_pipeline(model_path, dtype)
     is_dual = getattr(pipe, "transformer_2", None) is not None
     if is_dual:
         print("  detected MoE A14B variant (transformer + transformer_2)")
+
+    # Capture the model's production boundary_ratio (from model_index.json) so
+    # we can restore it before pass 2. --calib-boundary-ratio only overrides
+    # pass 1 to give `transformer` more amax samples; pass 2 must run at the
+    # production boundary so `transformer_2` calibrates on the same noise
+    # distribution it will see at inference time.
+    production_boundary = pipe.config.get("boundary_ratio") if is_dual else None
 
     quant_config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
     if weight_block_size is not None:
@@ -526,25 +534,43 @@ def main() -> None:
     # transformer_2 (low noise) by boundary_timestep, so each forward_loop run
     # exercises the backbone currently being calibrated. mtq.quantize wraps
     # quantizers and then drives the forward_loop to collect amax statistics.
-    pipe.transformer = _calibrate_and_force_export(
+    #
+    # Calibration must complete for BOTH backbones BEFORE any force_export call:
+    # Before _force_export, transformer's weights must still be BF16 at that point.
+    if is_dual and args.calib_boundary_ratio is not None:
+        pipe.register_to_config(boundary_ratio=args.calib_boundary_ratio)
+        print(
+            f"\n  pass 1 boundary_ratio: {args.calib_boundary_ratio} "
+            f"(override of production {production_boundary} for transformer sample boost)"
+        )
+
+    pipe.transformer = _calibrate(
         pipe.transformer,
         "transformer",
         mtq=mtq,
         quant_config=quant_config,
         forward_loop=forward_loop,
         quantize_mha=args.quantize_mha,
-        dtype=dtype,
     )
     if is_dual:
-        pipe.transformer_2 = _calibrate_and_force_export(
+        if args.calib_boundary_ratio is not None:
+            pipe.register_to_config(boundary_ratio=production_boundary)
+            print(
+                f"\n  pass 2 boundary_ratio: {production_boundary} "
+                "(restored to production for transformer_2 in-distribution calibration)"
+            )
+        pipe.transformer_2 = _calibrate(
             pipe.transformer_2,
             "transformer_2",
             mtq=mtq,
             quant_config=quant_config,
             forward_loop=forward_loop,
             quantize_mha=args.quantize_mha,
-            dtype=dtype,
         )
+
+    _force_export(pipe.transformer, "transformer", dtype)
+    if is_dual:
+        _force_export(pipe.transformer_2, "transformer_2", dtype)
 
     print("\nSaving pipeline with FP8 transformer(s)...")
     _save_pipeline_with_fp8_transformers(pipe, model_path, output_dir)
