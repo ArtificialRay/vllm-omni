@@ -40,7 +40,8 @@ image = (
         "uv pip uninstall --system opencv-python || true",
         "uv pip install --system --reinstall opencv-python-headless",
         "uv pip install --system 'nvidia-modelopt[all]'",
-        "uv pip install --system lpips"
+        "uv pip install --system lpips",
+        "uv pip install --system ftfy"
     )
 )
 

@@ -37,18 +37,11 @@ Example (480p T2V):
         --output ./hv15-480p-t2v-modelopt-fp8 \\
         --overwrite
 
-Example (720p T2V):
-    python examples/quantization/quantize_hunyuanvideo_15_modelopt_fp8.py \\
-        --model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v \\
-        --height 720 --width 1280 \\
-        --output ./hv15-720p-t2v-modelopt-fp8 \\
-        --overwrite
-
 Example (480p I2V):
     python examples/quantization/quantize_hunyuanvideo_15_modelopt_fp8.py \\
         --model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v \\
         --variant i2v \\
-        --reference-images examples/quantization/calibration_assets/hv15_i2v \\
+        --reference-images /path/to/ref_images \\
         --output ./hv15-480p-i2v-modelopt-fp8 \\
         --overwrite
 """
@@ -133,9 +126,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--weight-block-size",
         type=str,
         default=None,
-        help="Per-block weight quantization as 'M,N' (e.g. '128,128' for 128x128 tiles). "
-        "Default: per-tensor (one scale per linear). Block-wise typically gives tighter quality at "
-        "negligible memory cost. Static FP8 is exempt from upstream vLLM's online block-wise gate.",
+        help="Per-block weight quantization as 'M,N'. Only '128,128' is accepted because upstream "
+        "vLLM's ModelOptFp8PbWoLinearMethod hardcodes that block shape. Default: per-tensor. "
+        "Block-wise saves checkpoints with FP8_PB_WO routing (per-block static weights + per-token-"
+        "group dynamic activations); per-tensor uses static FP8 with calibrated activation scales.",
     )
     p.add_argument("--overwrite", action="store_true", help="Replace an existing output directory.")
     return p
@@ -378,10 +372,15 @@ def _force_export_quantized_weights(backbone: torch.nn.Module, dtype: torch.dtyp
 def _hv15_quant_config_block(weight_block_size: list[int] | None = None) -> dict:
     """Mirror ModelOpt FP8 metadata expected by vllm-omni's adapter (#2913).
 
-    Same shape as the HunyuanImage-3 author's _hunyuan_quant_config(). When
-    `weight_block_size` is given, advertise block-wise weight quantization in
-    the saved metadata (so consumers know to expect multi-element scale tensors).
+    For per-block weight quantization,upstream's FP8_PB_WO hardcodes _WEIGHT_BLOCK_SIZE = (128, 128), so any other
+    block shape produces a checkpoint vLLM cannot serve.
     """
+    if weight_block_size is not None and tuple(weight_block_size) != (128, 128):
+        raise ValueError(
+            f"--weight-block-size {tuple(weight_block_size)} not supported: upstream vLLM's "
+            "ModelOptFp8PbWoLinearMethod hardcodes (128, 128). Pass '128,128' or omit the flag."
+        )
+
     weights_cfg: dict = {"dynamic": False, "num_bits": 8, "type": "float"}
     if weight_block_size is not None:
         weights_cfg["strategy"] = "block"
@@ -410,7 +409,7 @@ def _hv15_quant_config_block(weight_block_size: list[int] | None = None) -> dict
             "x_embedder*",
         ],
         "producer": {"name": "modelopt"},
-        "quant_algo": "FP8",
+        "quant_algo": "FP8_PB_WO" if weight_block_size is not None else "FP8",
         "quant_method": "modelopt",
     }
 

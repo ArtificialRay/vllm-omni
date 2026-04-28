@@ -20,9 +20,7 @@ Supported targets:
 - `Wan-AI/Wan2.2-I2V-A14B-Diffusers` (MoE, two transformers, needs 2+ GPUs BF16)
 
 For VACE variants (Wan-AI/Wan2.X-VACE-*), use the dedicated script
-`quantize_wan2_2_vace_modelopt_fp8.py` instead — VACE has multiple conditioning
-modes (T2V/R2V/I2V/FLF2V/inpaint) and a separate `vace_blocks` ModuleList that
-need their own calibration treatment.
+`quantize_wan2_2_vace_modelopt_fp8.py` instead
 
 For MoE A14B variants the diffusers pipeline routes between `transformer` (high
 noise, t >= boundary_timestep) and `transformer_2` (low noise) automatically
@@ -119,9 +117,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--weight-block-size",
         type=str,
         default=None,
-        help="Per-block weight quantization as 'M,N' (e.g. '128,128'). Default per-tensor. "
-        "Note: vllm-omni's ModelOpt adapter may not yet dispatch block-wise scales — check #2924 "
-        "for the HV-1.5 investigation status before relying on this.",
+        help="Per-block weight quantization as 'M,N'. Only '128,128' is accepted because upstream "
+        "vLLM's ModelOptFp8PbWoLinearMethod hardcodes that block shape. Default: per-tensor. "
+        "Block-wise saves checkpoints with FP8_PB_WO routing (per-block static weights + per-token-"
+        "group dynamic activations); per-tensor uses static FP8 with calibrated activation scales.",
     )
     p.add_argument(
         "--calib-boundary-ratio",
@@ -423,7 +422,17 @@ def _force_export_quantized_weights(backbone: torch.nn.Module, dtype: torch.dtyp
 
 
 def _wan22_quant_config_block(weight_block_size: list[int] | None = None) -> dict:
-    """Mirror ModelOpt FP8 metadata expected by vllm-omni's adapter (#2913)."""
+    """Mirror ModelOpt FP8 metadata expected by vllm-omni's adapter (#2913).
+
+    For per-block weight quantization,upstream's FP8_PB_WO hardcodes _WEIGHT_BLOCK_SIZE = (128, 128), so any other
+    block shape produces a checkpoint vLLM cannot serve.
+    """
+    if weight_block_size is not None and tuple(weight_block_size) != (128, 128):
+        raise ValueError(
+            f"--weight-block-size {tuple(weight_block_size)} not supported: upstream vLLM's "
+            "ModelOptFp8PbWoLinearMethod hardcodes (128, 128). Pass '128,128' or omit the flag."
+        )
+
     weights_cfg: dict = {"dynamic": False, "num_bits": 8, "type": "float"}
     if weight_block_size is not None:
         weights_cfg["strategy"] = "block"
@@ -446,7 +455,7 @@ def _wan22_quant_config_block(weight_block_size: list[int] | None = None) -> dic
             "timestep_proj_prepare*",
         ],
         "producer": {"name": "modelopt"},
-        "quant_algo": "FP8",
+        "quant_algo": "FP8_PB_WO" if weight_block_size is not None else "FP8",
         "quant_method": "modelopt",
     }
 

@@ -49,15 +49,46 @@ def _check_config(transformer_dir: Path) -> int:
     issues = []
     if qc.get("quant_method") != "modelopt":
         issues.append(f"quant_method={qc.get('quant_method')!r} (expected 'modelopt')")
-    if qc.get("quant_algo") != "FP8":
-        issues.append(f"quant_algo={qc.get('quant_algo')!r} (expected 'FP8' — vllm-omni adapter may not auto-detect)")
+
+    quant_algo = qc.get("quant_algo")
+    if quant_algo not in ("FP8", "FP8_PB_WO"):
+        issues.append(
+            f"quant_algo={quant_algo!r} (expected 'FP8' for per-tensor or "
+            "'FP8_PB_WO' for 128x128 block-wise — other algos aren't routed by "
+            "vllm-omni's adapter today)"
+        )
+
+    # Cross-check that the saved weight strategy and the dispatch field agree.
+    # Producer scripts can in principle drift apart (e.g. metadata says "block"
+    # but quant_algo still claims "FP8"), and that lands as an AssertionError at
+    # weight load time because the runtime LinearMethod expects scalar scales but
+    # finds 4D block ones. Failing here is much friendlier.
+    cfg_groups = qc.get("config_groups", {})
+    weight_strategies = {
+        (group or {}).get("weights", {}).get("strategy")
+        for group in cfg_groups.values()
+        if isinstance(group, dict)
+    }
+    weight_strategies.discard(None)
+    if weight_strategies == {"block"} and quant_algo != "FP8_PB_WO":
+        issues.append(
+            f"weights.strategy='block' but quant_algo={quant_algo!r}. Per-block "
+            "weight scales require FP8_PB_WO so upstream vLLM dispatches to "
+            "ModelOptFp8PbWoLinearMethod; FP8 routes to per-tensor and crashes "
+            "on the 4D weight_scale at weight load time."
+        )
+    elif quant_algo == "FP8_PB_WO" and weight_strategies != {"block"}:
+        issues.append(
+            f"quant_algo='FP8_PB_WO' but weights.strategy={weight_strategies!r} "
+            "(expected {'block'}). FP8_PB_WO consumers expect 4D per-block scales."
+        )
 
     if issues:
         print("[A] WARN — config looks incomplete:")
         for issue in issues:
             print(f"    - {issue}")
         return 2
-    print("[A] PASS — config looks correct.")
+    print(f"[A] PASS — config looks correct (quant_algo={quant_algo}).")
     return 0
 
 

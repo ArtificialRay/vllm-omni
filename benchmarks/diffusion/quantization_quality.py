@@ -38,7 +38,7 @@ Video example (text-to-video) with offline quant:
     python benchmarks/diffusion/quantization_quality.py \
         --use-offline-quant \
         --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
-        --model-quant-checkpoint vllm-omni/wan22-t2v-modelopt-fp8\
+        --model-quant-checkpoint /vllm-omni/wan22-t2v-modelopt-fp8\
         --task t2v \
         --quantization fp8 \
         --prompts \
@@ -51,15 +51,15 @@ Video example (image-to-video) with offline quant:
     python benchmarks/diffusion/quantization_quality.py \
         --use-offline-quant \
         --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
-        --model-quant-checkpoint vllm-omni/wan22-i2v-modelopt-fp8\
+        --model-quant-checkpoint /vllm-omni/wan22-i2v-modelopt-fp8\
         --task i2v \
         --quantization fp8 \
         --prompts \
             "An astronaut riding a horse across the surface of Mars, red dust swirling, cinematic wide shot." \
             "A skateboarder doing a kickflip in an urban plaza, slow motion, golden hour lighting." \
         --height 720 --width 1280 \
-        --image /path/to/ref_images/
-        --num-frames 81 --num-inference-steps 40 --seed 42
+        --image /path/to/ref_images/ \
+        --num-frames 81 --num-inference-steps 40 --seed 42 --vae-use-tiling
 
 Multiple quantization methods:
     python benchmarks/diffusion/quantization_quality.py \
