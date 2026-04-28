@@ -34,22 +34,22 @@ kwarg, so calibration must pair every prompt with a reference image — pass
 `--is-i2v` together with `--reference-images <dir-or-file>`.
 
 Example(TI2V-5B):
-    python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
-        --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \\
-        --output ./wan22-ti2v-modelopt-fp8 \\
+    python examples/quantization/quantize_wan2_2_modelopt_fp8.py \
+        --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \
+        --output ./wan22-ti2v-modelopt-fp8 \
         --overwrite
 Example(T2V-A14B):
-    python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
-            --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \\
-            --output ./wan22-t2v-modelopt-fp8 \\
-            --calib-boundary-ratio 0.5 \\
+    python examples/quantization/quantize_wan2_2_modelopt_fp8.py \
+            --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+            --output ./wan22-t2v-modelopt-fp8 \
+            --calib-boundary-ratio 0.5 \
             --overwrite
 Example(I2V-A14B):
-    python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
-            --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \\
-            --output ./wan22-i2v-modelopt-fp8 \\
-            --is-i2v --reference-images /path/to/ref_images/ \\
-            --calib-boundary-ratio 0.5 \\
+    python examples/quantization/quantize_wan2_2_modelopt_fp8.py \
+            --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
+            --output ./wan22-i2v-modelopt-fp8 \
+            --is-i2v --reference-images /path/to/ref_images/ \
+            --calib-boundary-ratio 0.5 \
             --overwrite
 """
 

@@ -317,8 +317,10 @@ def run_benchmark(args):
     baseline_outputs = {}  # prompt -> (output, time, mem)
     for i,prompt in enumerate(prompts):
         print(f"  Generating: {prompt[:60]}...")
-        if is_video:
+        if is_video and input_images is not None:
             out, t, mem = _generate_video(omni_bl, args, prompt, seed,input_images[i % len(input_images)])
+        elif is_video:
+            out, t, mem = _generate_video(omni_bl, args, prompt, seed)
         else:
             out, t, mem = _generate_image(omni_bl, args, prompt, seed)
         baseline_outputs[prompt] = (out, t, mem)
@@ -358,8 +360,10 @@ def run_benchmark(args):
         qt_outputs = {}
         for i,prompt in enumerate(prompts):
             print(f"  Generating: {prompt[:60]}...")
-            if is_video:
+            if is_video and input_images is not None:
                 out, t, mem = _generate_video(omni_qt, args, prompt, seed,input_images[i % len(input_images)])
+            elif is_video:
+                out, t, mem = _generate_video(omni_qt, args, prompt, seed)
             else:
                 out, t, mem = _generate_image(omni_qt, args, prompt, seed)
             qt_outputs[prompt] = (out, t, mem)
