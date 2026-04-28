@@ -5,13 +5,11 @@
 
   - T2V    : prompt only (vace_context auto-filled with zeros + mask=1)
   - R2V    : prompt + reference_images=[PIL.Image]
-  - I2V    : prompt + reference_images=[PIL.Image]
+  - I2V    : prompt + reference_images=[PIL.Image], same as R2V in calibration step
 
 This script currently calibrates with **T2V + R2V + I2V** samples. The other modes
 (I2V/FLF2V/inpaint) require encoded video + mask inputs and can be wired in
-later by extending `_build_calib_samples`. T2V + R2V + I2V are sufficient to drive
-the vace_blocks across both zero- and real-conditioning amax extremes, which
-is what static FP8 needs for the broadest scale coverage.
+later by extending `_build_calib_samples`.
 
 Layers kept full precision match the Wan2.2 pattern: condition embedder
 (time/text/image), patch embedding, modulation (scale_shift_table), final
