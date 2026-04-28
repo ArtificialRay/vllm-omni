@@ -262,8 +262,6 @@ def _generate_video(omni, args, prompt, seed,image=None):
     else:
         raise ValueError("Could not extract video frames from output.")
 
-    if isinstance(frames,list):
-        frames = frames[0]
     if isinstance(frames, torch.Tensor):
         video = frames.detach().cpu()
         if video.dim() == 5:
@@ -275,6 +273,8 @@ def _generate_video(omni, args, prompt, seed,image=None):
         frames_array = video.float().numpy()
     else:
         frames_array = np.asarray(frames)
+        if frames_array.ndim ==6:# wan2.2: inner.images = [ndarray[1,F,H,W,C]]
+            frames_array = frames_array[0]
         if frames_array.ndim == 5:
             frames_array = frames_array[0]
 
