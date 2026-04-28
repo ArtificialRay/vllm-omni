@@ -153,7 +153,8 @@ def _build_omni_kwargs(args, quantization=None):
             "model": args.model_quant_checkpoint if args.use_offline_quant else args.model,
             "parallel_config": parallel_config,
             "enforce_eager": args.enforce_eager,
-            "quantization_config":quantization
+            "quantization_config":quantization,
+            "vae_use_tiling":args.vae_use_tiling
         }
     else:
         kwargs = {
