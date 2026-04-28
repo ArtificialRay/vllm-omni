@@ -38,13 +38,27 @@ Video example (text-to-video) with offline quant:
     python benchmarks/diffusion/quantization_quality.py \
         --use-offline-quant \
         --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
-        --model-quant-checkpoint vllm-omni/Wan2.2-T2V-A14B-Diffusers\
+        --model-quant-checkpoint vllm-omni/wan22-t2v-modelopt-fp8\
         --task t2v \
         --quantization fp8 \
         --prompts \
             "A serene lakeside sunrise with mist over the water" \
             "A cat walking across a wooden bridge in autumn" \
         --height 720 --width 1280 \
+        --num-frames 81 --num-inference-steps 40 --seed 42
+
+Video example (image-to-video) with offline quant:
+    python benchmarks/diffusion/quantization_quality.py \
+        --use-offline-quant \
+        --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
+        --model-quant-checkpoint vllm-omni/wan22-i2v-modelopt-fp8\
+        --task i2v \
+        --quantization fp8 \
+        --prompts \
+            "An astronaut riding a horse across the surface of Mars, red dust swirling, cinematic wide shot." \
+            "A skateboarder doing a kickflip in an urban plaza, slow motion, golden hour lighting." \
+        --height 720 --width 1280 \
+        --image /path/to/ref_images/
         --num-frames 81 --num-inference-steps 40 --seed 42
 
 Multiple quantization methods:
@@ -67,7 +81,7 @@ import argparse
 import gc
 import time
 from pathlib import Path
-
+from typing import Any
 import numpy as np
 import torch
 
@@ -166,6 +180,23 @@ def _build_omni_kwargs(args, quantization=None):
     
     return kwargs
 
+def _load_reference_images(spec: str | None) -> list[Any]:
+    """Load PIL.Image list from a directory or a single file path."""
+    if spec is None:
+        return []
+    from PIL import Image
+
+    p = Path(spec).expanduser()
+    if not p.exists():
+        raise SystemExit(f"--reference-images path not found: {p}")
+    if p.is_file():
+        return [Image.open(p).convert("RGB")]
+    image_paths = sorted(
+        f for f in p.iterdir() if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+    )
+    if not image_paths:
+        raise SystemExit(f"No image files (jpg/jpeg/png/webp) found in {p}")
+    return [Image.open(f).convert("RGB") for f in image_paths]
 
 def _generate_image(omni, args, prompt, seed):
     """Generate a single image and return (PIL.Image, time_seconds, memory_gib)."""
@@ -193,17 +224,20 @@ def _generate_image(omni, args, prompt, seed):
     return img, elapsed, peak_mem
 
 
-def _generate_video(omni, args, prompt, seed):
+def _generate_video(omni, args, prompt, seed,image=None):
     """Generate a video and return (np.ndarray [F,H,W,C], time_seconds, memory_gib)."""
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
     from vllm_omni.outputs import OmniRequestOutput
     from vllm_omni.platforms import current_omni_platform
 
+    request = {"prompt": prompt, "negative_prompt": ""}
+    if image is not None:
+        request["multi_modal_data"] = {"image": image}
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(seed)
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     outputs = omni.generate(
-        {"prompt": prompt, "negative_prompt": ""},
+        request,
         OmniDiffusionSamplingParams(
             height=args.height,
             width=args.width,
@@ -262,9 +296,11 @@ def run_benchmark(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    is_video = args.task == "t2v"
+    is_video = args.task in ("t2v", "i2v", "ti2v")
+    is_image_conditioned = args.task == "i2v" or (args.task == "ti2v" and args.images is not None)
     prompts = args.prompts
     seed = args.seed
+    input_images = _load_reference_images(args.images) if is_image_conditioned else None
 
     # Determine configs to benchmark
     configs = []  # list of (label, quantization_method)
@@ -279,10 +315,10 @@ def run_benchmark(args):
     omni_bl = Omni(**bl_kwargs)
 
     baseline_outputs = {}  # prompt -> (output, time, mem)
-    for prompt in prompts:
+    for i,prompt in enumerate(prompts):
         print(f"  Generating: {prompt[:60]}...")
         if is_video:
-            out, t, mem = _generate_video(omni_bl, args, prompt, seed)
+            out, t, mem = _generate_video(omni_bl, args, prompt, seed,input_images[i % len(input_images)])
         else:
             out, t, mem = _generate_image(omni_bl, args, prompt, seed)
         baseline_outputs[prompt] = (out, t, mem)
@@ -320,10 +356,10 @@ def run_benchmark(args):
         omni_qt = Omni(**qt_kwargs)
 
         qt_outputs = {}
-        for prompt in prompts:
+        for i,prompt in enumerate(prompts):
             print(f"  Generating: {prompt[:60]}...")
             if is_video:
-                out, t, mem = _generate_video(omni_qt, args, prompt, seed)
+                out, t, mem = _generate_video(omni_qt, args, prompt, seed,input_images[i % len(input_images)])
             else:
                 out, t, mem = _generate_image(omni_qt, args, prompt, seed)
             qt_outputs[prompt] = (out, t, mem)
@@ -446,8 +482,8 @@ def parse_args():
     parser.add_argument(
         "--task",
         default="t2i",
-        choices=["t2i", "t2v"],
-        help="Task type: t2i (text-to-image) or t2v (text-to-video).",
+        choices=["t2i", "t2v", "i2v", "ti2v"],
+        help="Task type: t2i (text-to-image), t2v (text-to-video), i2v / ti2v (image-to-video).",
     )
     parser.add_argument(
         "--quantization",
@@ -460,6 +496,11 @@ def parse_args():
         nargs="+",
         default=["a cup of coffee on the table"],
         help="One or more prompts to generate.",
+    )
+    parser.add_argument(
+        "--images",
+        default=None,
+        help="Path to input images (required for i2v and ti2v tasks).",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--height", type=int, default=1024)
@@ -486,6 +527,8 @@ def parse_args():
         help="Enable VAE tiling for memory optimization.Specifically for bf16 model",
     )
     args = parser.parse_args()
+    if args.task in ("i2v") and args.images is None:
+        parser.error(f"--task {args.task} requires --images")
     if args.use_offline_quant and not args.model_quant_checkpoint:
         parser.error("--use-offline-quant requires --model-quant-checkpoint")
     return args
