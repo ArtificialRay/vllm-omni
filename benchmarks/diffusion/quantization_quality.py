@@ -160,6 +160,7 @@ def _build_omni_kwargs(args, quantization=None):
             "model": args.model,
             "parallel_config": parallel_config,
             "enforce_eager": args.enforce_eager,
+            "vae_use_tiling":args.vae_use_tiling
         }
     
     return kwargs
@@ -478,6 +479,11 @@ def parse_args():
     parser.add_argument("--ring-degree", type=int, default=1)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument(
+        "--vae-use-tiling",
+        action="store_true",
+        help="Enable VAE tiling for memory optimization.Specifically for bf16 model",
+    )
     args = parser.parse_args()
     if args.use_offline_quant and not args.model_quant_checkpoint:
         parser.error("--use-offline-quant requires --model-quant-checkpoint")
