@@ -212,9 +212,9 @@ def _generate_video(omni, args, prompt, seed):
         ),
     )
     elapsed = time.perf_counter() - start
-    peak_mem = torch.cuda.max_memory_allocated() / (1024**3)
 
     first = outputs[0]
+    peak_mem = getattr(first, "peak_memory_mb", 0.0) / 1024  # MB -> GiB
     if hasattr(first, "request_output") and isinstance(first.request_output, list):
         inner = first.request_output[0]
         if isinstance(inner, OmniRequestOutput) and hasattr(inner, "images"):
@@ -226,6 +226,8 @@ def _generate_video(omni, args, prompt, seed):
     else:
         raise ValueError("Could not extract video frames from output.")
 
+    if isinstance(frames,list):
+        frames = frames[0]
     if isinstance(frames, torch.Tensor):
         video = frames.detach().cpu()
         if video.dim() == 5:
@@ -286,6 +288,7 @@ def run_benchmark(args):
     bl_avg_time = np.mean([v[1] for v in baseline_outputs.values()])
     bl_mem = baseline_outputs[prompts[0]][2]  # use first prompt's memory
     _unload_omni(omni_bl)
+    del omni_bl # must explicitly del omni_bl otherwise will cause oom when running next model
 
     # Save baseline outputs
     bl_dir = output_dir / "baseline"
@@ -326,7 +329,7 @@ def run_benchmark(args):
         qt_avg_time = np.mean([v[1] for v in qt_outputs.values()])
         qt_mem = qt_outputs[prompts[0]][2]
         _unload_omni(omni_qt)
-
+        del omni_qt  # must explicitly del omni_qt otherwise will cause oom when running next model
         # Save quantized outputs
         qt_dir = output_dir / config_label.replace(" ", "_")
         qt_dir.mkdir(parents=True, exist_ok=True)

@@ -19,12 +19,19 @@ Supported targets:
 - `Wan-AI/Wan2.2-T2V-A14B-Diffusers` (MoE, two transformers, needs 2+ GPUs BF16)
 - `Wan-AI/Wan2.2-I2V-A14B-Diffusers` (MoE, two transformers, needs 2+ GPUs BF16)
 
+For VACE variants (Wan-AI/Wan2.X-VACE-*), use the dedicated script
+`quantize_wan2_2_vace_modelopt_fp8.py` instead — VACE has multiple conditioning
+modes (T2V/R2V/I2V/FLF2V/inpaint) and a separate `vace_blocks` ModuleList that
+need their own calibration treatment.
+
 For MoE A14B variants the diffusers pipeline routes between `transformer` (high
 noise, t >= boundary_timestep) and `transformer_2` (low noise) automatically
 based on `boundary_ratio` from `model_index.json`. A single calibration run
 collects amax statistics for both via timestep-conditioned forward passes.
 
-TODO: To quantize A14B model, maybe setup --calib-steps = 40
+For I2V variants diffusers' WanImageToVideoPipeline takes a required `image`
+kwarg, so calibration must pair every prompt with a reference image — pass
+`--is-i2v` together with `--reference-images <dir-or-file>`.
 
 Example(TI2V-5B):
     python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
@@ -34,8 +41,14 @@ Example(TI2V-5B):
 Example(T2V-A14B):
     python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
             --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \\
-            --output ./wan22-ti2v-modelopt-fp8 \\
+            --output ./wan22-t2v-modelopt-fp8 \\
             --calib-boundary-ratio 0.5 \\
+            --overwrite
+Example(I2V-A14B):
+    python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
+            --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \\
+            --output ./wan22-i2v-a14b-fp8 \\
+            --is-i2v --reference-images /path/to/ref_images/ \\
             --overwrite
 """
 
@@ -64,7 +77,6 @@ DEFAULT_PROMPTS = [
     "A skateboarder doing a kickflip in an urban plaza, slow motion, golden hour lighting.",
 ]
 
-
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", required=True, help="Input Wan2.2 diffusers directory or HF id.")
@@ -86,7 +98,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Denoising steps per calibration prompt (10 is enough for amax statistics).",
     )
-    p.add_argument("--calib-size", type=int, default=8, help="How many prompts to use for calibration.")
+    p.add_argument("--calib-size", type=int, default=8, help="How many prompts to use for calibration. It is now decoupled with " \
+    "number of DEFAULT_PROMPTS, i.e. type any size you like" 
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--prompt",
@@ -118,6 +132,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "sample WITHOUT bumping --calib-steps. Pass 2 always restores the model's "
         "production boundary_ratio (A14B = 0.875) to keep transformer_2's amax in "
         "production distribution. If unset, both passes use the production value (default).",
+    )
+    p.add_argument(
+        "--is-i2v",
+        action="store_true",
+        help="Set when quantizing a Wan2.2 I2V model (e.g. Wan2.2-I2V-A14B-Diffusers). "
+        "diffusers' WanImageToVideoPipeline takes a required `image` kwarg, so calibration "
+        "must pair every prompt with a reference image — pass --reference-images.",
+    )
+    p.add_argument(
+        "--reference-images",
+        type=str,
+        default=None,
+        help="Requires --is-i2v. Directory of jpg/jpeg/png/webp files (or a single image). "
+        "Every calibration sample is paired with a cycled ref image since image_embedder "
+        "is required, not optional, in I2V pipelines. Warning: one image per sample",
     )
     p.add_argument("--overwrite", action="store_true", help="Replace an existing output directory.")
     return p
@@ -158,14 +187,46 @@ def _select_dtype(name: str) -> torch.dtype:
     return {"bfloat16": torch.bfloat16, "float16": torch.float16}[name]
 
 
-def _build_prompts(args: argparse.Namespace) -> list[str]:
-    prompts = args.prompt or DEFAULT_PROMPTS
+def _load_reference_images(spec: str | None) -> list[Any]:
+    """Load PIL.Image list from a directory or a single file path."""
+    if spec is None:
+        return []
+    from PIL import Image
+
+    p = Path(spec).expanduser()
+    if not p.exists():
+        raise SystemExit(f"--reference-images path not found: {p}")
+    if p.is_file():
+        return [Image.open(p).convert("RGB")]
+    image_paths = sorted(
+        f for f in p.iterdir() if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+    )
+    if not image_paths:
+        raise SystemExit(f"No image files (jpg/jpeg/png/webp) found in {p}")
+    return [Image.open(f).convert("RGB") for f in image_paths]
+
+
+def _build_calib_samples(
+    args: argparse.Namespace,
+    is_i2v: bool,
+    ref_images: list[Any],
+) -> list[tuple[str, Any]]:
+    """Build calibration (prompt, reference_image_or_None) pairs.
+
+    - Non-I2V (T2V/TI2V/A14B-T2V): every sample is (prompt, None).
+    - I2V: every sample paired with a cycled ref image (image kwarg is required
+      by diffusers' WanImageToVideoPipeline). Prompt pool is DEFAULT_PROMPTS
+      since the image dominates the visual signal — text mainly drives motion.
+    """
     if args.calib_size <= 0:
         raise SystemExit("--calib-size must be positive.")
-    if len(prompts) < args.calib_size:
-        repeats = (args.calib_size + len(prompts) - 1) // len(prompts)
-        prompts = (prompts * repeats)[: args.calib_size]
-    return prompts[: args.calib_size]
+
+    prompts = args.prompt or DEFAULT_PROMPTS
+    if is_i2v:
+        # ref_images is guaranteed non-empty by main()'s validation (--is-i2v
+        # requires --reference-images).
+        return [(prompt, ref_images[i % len(ref_images)]) for i, prompt in enumerate(prompts)]
+    return [(prompt, None) for prompt in prompts]
 
 
 # Layers to KEEP at full precision. Wan2.2's module naming:
@@ -257,7 +318,17 @@ def _load_pipeline(model_path: str, dtype: torch.dtype) -> DiffusionPipeline:
     return pipe
 
 
-def _build_forward_loop(pipe: DiffusionPipeline, args: argparse.Namespace, prompts: list[str]):
+def _build_forward_loop(
+    pipe: DiffusionPipeline,
+    args: argparse.Namespace,
+    samples: list[tuple[str, Any]],
+):
+    """Build a forward_loop that drives `pipe` over the calibration samples.
+
+    Samples carrying a reference image are forwarded with `image=PIL.Image`
+    (the kwarg expected by diffusers' WanImageToVideoPipeline). Samples with
+    ref=None call pipe(prompt=...) — the standard T2V path.
+    """
     generator = torch.Generator(device="cuda")
 
     # Try setting guidance on the pipeline's guider if present (newer diffusers APIs).
@@ -278,16 +349,19 @@ def _build_forward_loop(pipe: DiffusionPipeline, args: argparse.Namespace, promp
 
     def forward_loop(*_unused_args, **_unused_kwargs) -> None:
         with torch.inference_mode():
-            for idx, prompt in enumerate(prompts):
+            for idx, (prompt, ref_image) in enumerate(samples):
                 generator.manual_seed(args.seed + idx)
+                kwargs = dict(base_kwargs)
+                if ref_image is not None:
+                    kwargs["image"] = ref_image
                 # Try with guidance_scale first; fall back without on TypeError
                 # for pipelines that take CFG via guider config only.
                 try:
-                    pipe(prompt=prompt, generator=generator, guidance_scale=args.guidance_scale, **base_kwargs)
+                    pipe(prompt=prompt, generator=generator, guidance_scale=args.guidance_scale, **kwargs)
                 except TypeError as exc:
                     if "guidance_scale" not in str(exc):
                         raise
-                    pipe(prompt=prompt, generator=generator, **base_kwargs)
+                    pipe(prompt=prompt, generator=generator, **kwargs)
 
     return forward_loop
 
@@ -488,8 +562,19 @@ def main() -> None:
     mtq = _require_modelopt()
     model_path, output_dir = _ensure_paths(args)
     dtype = _select_dtype(args.dtype)
-    prompts = _build_prompts(args)
     weight_block_size = _parse_block_size(args.weight_block_size)
+
+    if args.reference_images is not None and not args.is_i2v:
+        raise SystemExit("--reference-images requires --is-i2v.")
+    if args.is_i2v and args.reference_images is None:
+        raise SystemExit(
+            "--is-i2v requires --reference-images: diffusers' WanImageToVideoPipeline "
+            "takes a required `image` kwarg, so calibration must pair every prompt with "
+            "a reference image."
+        )
+    ref_images = _load_reference_images(args.reference_images) if args.is_i2v else []
+    samples = _build_calib_samples(args, args.is_i2v, ref_images)
+    sample_label = f"I2V={len(samples)}" if args.is_i2v else f"T2V={len(samples)}"
 
     print("Quantization plan:")
     print(f"  input:           {args.model}")
@@ -497,9 +582,12 @@ def main() -> None:
     print(f"  dtype:           {dtype}")
     print(f"  height/width:    {args.height}x{args.width}")
     print(f"  num_frames:      {args.num_frames}")
-    print(f"  calib_size:      {len(prompts)}")
+    print(f"  calib_size:      {len(samples)} ({sample_label})")
     print(f"  calib_steps:     {args.calib_steps}")
     print(f"  quantize_mha:    {args.quantize_mha}")
+    print(f"  is_i2v:          {args.is_i2v}")
+    if args.is_i2v:
+        print(f"  reference imgs:  {len(ref_images)}")
     print(
         f"  weight strategy: {'block-wise ' + str(weight_block_size) if weight_block_size else 'per-tensor (default)'}"
     )
@@ -527,7 +615,7 @@ def main() -> None:
             f"({weight_block_size[0]}x{weight_block_size[1]} tiles)"
         )
 
-    forward_loop = _build_forward_loop(pipe, args, prompts)
+    forward_loop = _build_forward_loop(pipe, args, samples)
 
     # Single-transformer (TI2V-5B) does one pass; MoE A14B variants do two.
     # The diffusers Wan22 pipeline routes between transformer (high noise) and
