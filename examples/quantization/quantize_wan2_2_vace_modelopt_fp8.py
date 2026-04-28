@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Quantize Wan VACE models to a ModelOpt FP8 Hugging Face checkpoint.
-
-VACE (Video All-in-one Creation Engine) extends the Wan transformer with a
-parallel `vace_blocks` ModuleList that consumes a `vace_context` tensor
-(encoded video + mask + reference image latents). The base WanVACEPipeline
-supports several conditioning modes via varying inputs (see
-`examples/offline_inference/vace/vace_video_generation.md`):
+"""Quantize Wan VACE models to a ModelOpt FP8 Hugging Face checkpoint. Support modes:
 
   - T2V    : prompt only (vace_context auto-filled with zeros + mask=1)
   - R2V    : prompt + reference_images=[PIL.Image]
-  - I2V    : prompt + video=[first_frame] + mask=[first_frame_mask]
-  - FLF2V  : prompt + video=[first, last] + mask spanning both
-  - inpaint: prompt + video + mask covering the region to regenerate
+  - I2V    : prompt + reference_images=[PIL.Image]
 
-This script currently calibrates with **T2V + R2V** samples. The other modes
+This script currently calibrates with **T2V + R2V + I2V** samples. The other modes
 (I2V/FLF2V/inpaint) require encoded video + mask inputs and can be wired in
-later by extending `_build_calib_samples`. T2V + R2V are sufficient to drive
+later by extending `_build_calib_samples`. T2V + R2V + I2V are sufficient to drive
 the vace_blocks across both zero- and real-conditioning amax extremes, which
 is what static FP8 needs for the broadest scale coverage.
 
@@ -30,22 +22,22 @@ they're standard `WanTransformerBlock` subclasses).
 Supported targets:
 - `Wan-AI/Wan2.1-VACE-1.3B-diffusers` (single-transformer, ~10GB BF16)
 - `Wan-AI/Wan2.1-VACE-14B-diffusers` (single-transformer, ~38GB BF16)
-- `Wan-AI/Wan2.2-VACE-A14B-Diffusers` (MoE + VACE, dual-transformer; needs 2+ GPUs BF16)
+- `Wan-AI/Wan2.2-VACE-A14B-Diffusers` (MoE + VACE, dual-transformer; needs 2+ GPUs BF16; Model not released yet, but the wiring is ready)
 
 For dual-transformer VACE the diffusers pipeline routes between `transformer`
 and `transformer_2` by `boundary_timestep` exactly like Wan2.2 MoE T2V/I2V.
 
 Example (VACE T2V calibration, no reference images):
-    python examples/quantization/quantize_wan2_2_vace_modelopt_fp8.py \\
-        --model Wan-AI/Wan2.1-VACE-1.3B-diffusers \\
-        --output ./wan21-vace-1.3b-fp8 \\
+    python examples/quantization/quantize_wan2_2_vace_modelopt_fp8.py \
+        --model Wan-AI/Wan2.1-VACE-1.3B-diffusers \
+        --output ./wan21-vace-1.3b-fp8 \
         --overwrite
 
 Example (VACE T2V + R2V mix, with reference images):
-    python examples/quantization/quantize_wan2_2_vace_modelopt_fp8.py \\
-        --model Wan-AI/Wan2.1-VACE-14B-diffusers \\
-        --output ./wan21-vace-14b-fp8 \\
-        --reference-images /path/to/ref_images/ \\
+    python examples/quantization/quantize_wan2_2_vace_modelopt_fp8.py \
+        --model Wan-AI/Wan2.1-VACE-14B-diffusers \
+        --output ./wan21-vace-14b-fp8 \
+        --reference-images /path/to/ref_images/ \
         --overwrite
 """
 

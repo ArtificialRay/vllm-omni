@@ -32,17 +32,17 @@ defaults, I2V derives from the reference image and ignores --height/--width):
 - 720p: --height 720 --width 1280
 
 Example (480p T2V):
-    python examples/quantization/quantize_hunyuanvideo_15_modelopt_fp8.py \\
-        --model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v \\
-        --output ./hv15-480p-t2v-modelopt-fp8 \\
+    python examples/quantization/quantize_hunyuanvideo_15_modelopt_fp8.py \
+        --model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v \
+        --output ./hv15-480p-t2v-modelopt-fp8 \
         --overwrite
 
 Example (480p I2V):
-    python examples/quantization/quantize_hunyuanvideo_15_modelopt_fp8.py \\
-        --model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v \\
-        --variant i2v \\
-        --reference-images /path/to/ref_images \\
-        --output ./hv15-480p-i2v-modelopt-fp8 \\
+    python examples/quantization/quantize_hunyuanvideo_15_modelopt_fp8.py \
+        --model hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v \
+        --variant i2v \
+        --reference-images /path/to/ref_images \
+        --output ./hv15-480p-i2v-modelopt-fp8 \
         --overwrite
 """
 
