@@ -47,7 +47,7 @@ Example(T2V-A14B):
 Example(I2V-A14B):
     python examples/quantization/quantize_wan2_2_modelopt_fp8.py \\
             --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \\
-            --output ./wan22-i2v-a14b-fp8 \\
+            --output ./wan22-i2v-modelopt-fp8 \\
             --is-i2v --reference-images /path/to/ref_images/ \\
             --calib-boundary-ratio 0.5 \\
             --overwrite
