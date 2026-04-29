@@ -28,7 +28,7 @@ LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/logs}"
 
 # Image dirs for i2v / R2V tasks. Override via env if your layout differs.
 WAN_I2V_IMAGES="${WAN_I2V_IMAGES:-/vllm-omni/images}"
-VACE_REF_IMAGES="${VACE_REF_IMAGES:-/vllm-omni/reference-images}"
+VACE_REF_IMAGES="${VACE_REF_IMAGES:-/vllm-omni/images}"
 
 mkdir -p "${OUTPUT_ROOT}" "${LOG_DIR}"
 
