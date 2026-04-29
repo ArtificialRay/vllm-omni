@@ -281,36 +281,6 @@ def _generate_video(omni, args, prompt, seed,image=None):
     return frames_array, elapsed, peak_mem
 
 
-def _gpu_memory_allocated_gib() -> float:
-    """Sum of `torch.cuda.memory_allocated()` across all visible devices, in GiB."""
-    if not torch.cuda.is_available():
-        return 0.0
-    n = torch.cuda.device_count()
-    for d in range(n):
-        torch.cuda.synchronize(d)
-    return sum(torch.cuda.memory_allocated(d) for d in range(n)) / (1024**3)
-
-
-def _measure_model_vram(constructor):
-    """Construct an Omni instance and return (instance, model_vram_gib).
-
-    Snapshots `torch.cuda.memory_allocated()` (summed over visible devices)
-    before/after the constructor runs and reports the delta. Calling
-    `empty_cache()` on both ends evicts transient loader buffers so the
-    measured delta reflects what actually stays resident in VRAM —
-    transformer weights, VAE, text encoder, scale tensors — i.e. the
-    quantity quantization directly compresses.
-    """
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    before = _gpu_memory_allocated_gib()
-    instance = constructor()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    after = _gpu_memory_allocated_gib()
-    return instance, after - before
-
-
 def _unload_omni(omni):
     """Delete Omni instance and free GPU memory."""
     del omni
@@ -342,8 +312,7 @@ def run_benchmark(args):
     print("Running BF16 baseline...")
     print("=" * 60)
     bl_kwargs = _build_omni_kwargs(args, quantization=None)
-    omni_bl, bl_model_vram = _measure_model_vram(lambda: Omni(**bl_kwargs))
-    print(f"  Model VRAM (resident after load): {bl_model_vram:.2f} GiB")
+    omni_bl = Omni(**bl_kwargs)
 
     baseline_outputs = {}  # prompt -> (output, time, mem)
     for i,prompt in enumerate(prompts):
@@ -386,11 +355,7 @@ def run_benchmark(args):
         print("=" * 60)
 
         qt_kwargs = _build_omni_kwargs(args, quantization=quant_method)
-        omni_qt, qt_model_vram = _measure_model_vram(lambda: Omni(**qt_kwargs))
-        msg = f"  Model VRAM (resident after load): {qt_model_vram:.2f} GiB"
-        if bl_model_vram > 0:
-            msg += f" ({(1 - qt_model_vram / bl_model_vram) * 100:.0f}% reduction vs BF16)"
-        print(msg)
+        omni_qt = Omni(**qt_kwargs)
 
         qt_outputs = {}
         for i,prompt in enumerate(prompts):
@@ -433,9 +398,6 @@ def run_benchmark(args):
         mean_lpips = np.mean([p["lpips"] for p in per_prompt])
         speedup = bl_avg_time / qt_avg_time if qt_avg_time > 0 else float("inf")
         mem_reduction = (bl_mem - qt_mem) / bl_mem * 100
-        model_vram_reduction = (
-            (bl_model_vram - qt_model_vram) / bl_model_vram * 100 if bl_model_vram > 0 else 0.0
-        )
         qt_throughput = args.num_inference_steps / qt_avg_time if qt_avg_time > 0 else float("inf")
 
         all_results.append(
@@ -444,8 +406,6 @@ def run_benchmark(args):
                 "avg_time": qt_avg_time,
                 "speedup": speedup,
                 "throughput_its": qt_throughput,
-                "model_vram_gib": qt_model_vram,
-                "model_vram_reduction_pct": model_vram_reduction,
                 "memory_gib": qt_mem,
                 "mem_reduction_pct": mem_reduction,
                 "mean_lpips": mean_lpips,
@@ -475,24 +435,20 @@ def run_benchmark(args):
     bl_throughput = args.num_inference_steps / bl_avg_time if bl_avg_time > 0 else float("inf")
     lines.append(
         "| Config | Avg Time | Speedup | Throughput (it/s) "
-        "| Model VRAM (GiB) | Model VRAM Reduction "
         "| Peak VRAM (GiB) | Peak VRAM Reduction | Mean LPIPS |"
     )
     lines.append(
         "|--------|----------|---------|--------------------"
-        "|------------------|-----------------------"
         "|-----------------|---------------------|------------|"
     )
     lines.append(
         f"| BF16 baseline | {bl_avg_time:.2f}s | 1.00x | {bl_throughput:.2f} "
-        f"| {bl_model_vram:.2f} | — "
         f"| {bl_mem:.2f} | — | (ref) |"
     )
     for r in all_results:
         lines.append(
             f"| {r['config']} | {r['avg_time']:.2f}s | {r['speedup']:.2f}x "
             f"| {r['throughput_its']:.2f} "
-            f"| {r['model_vram_gib']:.2f} | {r['model_vram_reduction_pct']:.0f}% "
             f"| {r['memory_gib']:.2f} | {r['mem_reduction_pct']:.0f}% "
             f"| {r['mean_lpips']:.4f} |"
         )
@@ -502,11 +458,11 @@ def run_benchmark(args):
         "> Throughput (it/s) = num_inference_steps / wall_time (text encode + denoising + VAE decode)."
     )
     lines.append(
-        "> Model VRAM = `torch.cuda.memory_allocated()` delta across Omni() construction "
-        "(model weights + scale tensors + scheduler buffers; the quantity quantization compresses)."
+        "> Peak VRAM = `max_memory_allocated` during one generate (model + activations + latents + VAE buffers)."
     )
     lines.append(
-        "> Peak VRAM = `max_memory_allocated` during one generate (model + activations + latents + VAE buffers)."
+        "> For model resident size on disk/VRAM, run `examples/quantization/check_modelopt_fp8_export.py "
+        "--output <ckpt> --baseline <hf-id-or-path>`."
     )
     lines.append("")
 
