@@ -28,7 +28,7 @@ LOG_DIR="${LOG_DIR:-${OUTPUT_ROOT}/logs}"
 
 # Image dirs for i2v / R2V tasks. Override via env if your layout differs.
 WAN_I2V_IMAGES="${WAN_I2V_IMAGES:-/vllm-omni/images}"
-VACE_REF_IMAGES="${VACE_REF_IMAGES:-/vllm-omni/reference-images}"
+VACE_REF_IMAGES="${VACE_REF_IMAGES:-/vllm-omni/images}"
 
 mkdir -p "${OUTPUT_ROOT}" "${LOG_DIR}"
 
@@ -36,9 +36,15 @@ BENCH_SCRIPT="${REPO_ROOT}/benchmarks/diffusion/quantization_quality.py"
 
 # Same prompt set across all configs so LPIPS rows can be compared meaningfully.
 PROMPTS=(
-    "An astronaut riding a horse across the surface of Mars, red dust swirling, cinematic wide shot."
-    "A skateboarder doing a kickflip in an urban plaza, slow motion, golden hour lighting."
+    "An astronaut in a white spacesuit riding a horse across the lunar surface, gray dust kicked up by the horse's hooves, Earth visible in the black sky, lunar lander in the distance, cinematic wide shot. Make sure the astronaut is really moving!"
+    "A skateboarder in a purple bomber jacket doing a kickflip in a foggy urban plaza, overcast morning light, slow motion, european architecture in the background."
 )
+
+# Wan2.2 I2V degenerates to a static first-frame copy without an anti-static
+# negative prompt — Wan's official one explicitly negates "static / still /
+# still frame". HunyuanVideo and Wan2.1 VACE produce normal motion with an
+# empty negative, so this is only passed to the Wan I2V configs below.
+WAN_I2V_NEGATIVE_PROMPT="vibrant colors, overexposed, static, blurred details, subtitles, style, artwork, painting, picture, still, overall gray, worst quality, low quality, JPEG compression artifacts, ugly, mutilated, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, still frame, cluttered background, three legs, many people in the background, walking backwards"
 
 # ============================================================
 # Pre-flight
@@ -110,6 +116,7 @@ bench_0_wan22_i2v_per_tensor() {  # GPU 0
         --task i2v \
         --quantization fp8 \
         --prompts "${PROMPTS[@]}" \
+        --negative-prompt "${WAN_I2V_NEGATIVE_PROMPT}" \
         --images "${WAN_I2V_IMAGES}" \
         --height 720 --width 1280 \
         --num-frames 49 --num-inference-steps 30 --seed 42 \
@@ -124,6 +131,7 @@ bench_1_wan22_i2v_per_block() {   # GPU 1
         --task i2v \
         --quantization fp8 \
         --prompts "${PROMPTS[@]}" \
+        --negative-prompt "${WAN_I2V_NEGATIVE_PROMPT}" \
         --images "${WAN_I2V_IMAGES}" \
         --height 720 --width 1280 \
         --num-frames 49 --num-inference-steps 30 --seed 42 \

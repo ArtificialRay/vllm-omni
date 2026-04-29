@@ -230,7 +230,7 @@ def _generate_video(omni, args, prompt, seed,image=None):
     from vllm_omni.outputs import OmniRequestOutput
     from vllm_omni.platforms import current_omni_platform
 
-    request = {"prompt": prompt, "negative_prompt": ""}
+    request = {"prompt": prompt, "negative_prompt": args.negative_prompt}
     if image is not None:
         request["multi_modal_data"] = {"image": image}
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(seed)
@@ -536,6 +536,13 @@ def parse_args():
     parser.add_argument("--num-frames", type=int, default=81, help="Number of video frames (t2v only).")
     parser.add_argument("--fps", type=int, default=24, help="Video FPS for saving (t2v only).")
     parser.add_argument("--guidance-scale", type=float, default=4.0, help="CFG scale (used for video).")
+    parser.add_argument(
+        "--negative-prompt",
+        type=str,
+        default="",
+        help="Negative prompt for video generation. Wan2.2 I2V degenerates to a static frame "
+             "without the official anti-static negative prompt; other pipelines work with empty.",
+    )
     parser.add_argument("--output-dir", type=str, default="./quant_bench_output", help="Directory to save outputs.")
     parser.add_argument(
         "--lpips-net",
