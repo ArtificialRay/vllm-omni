@@ -119,7 +119,7 @@ bench_0_wan22_i2v_per_tensor() {  # GPU 0
         --negative-prompt "${WAN_I2V_NEGATIVE_PROMPT}" \
         --images "${WAN_I2V_IMAGES}" \
         --height 720 --width 1280 \
-        --num-frames 49 --num-inference-steps 30 --seed 42 \
+        --num-frames 81 --num-inference-steps 50 --seed 42 \
         --vae-use-tiling
 }
 
@@ -134,7 +134,7 @@ bench_1_wan22_i2v_per_block() {   # GPU 1
         --negative-prompt "${WAN_I2V_NEGATIVE_PROMPT}" \
         --images "${WAN_I2V_IMAGES}" \
         --height 720 --width 1280 \
-        --num-frames 49 --num-inference-steps 30 --seed 42 \
+        --num-frames 81 --num-inference-steps 50 --seed 42 \
         --vae-use-tiling
 }
 
