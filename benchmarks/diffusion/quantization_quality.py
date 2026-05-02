@@ -34,16 +34,32 @@ Video example (text-to-video):
         --height 720 --width 1280 \
         --num-frames 81 --num-inference-steps 40 --seed 42
 
-Image-to-video example (i2v):
+Video example (text-to-video) with offline quant:
     python benchmarks/diffusion/quantization_quality.py \
-        --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
-        --task i2v \
-        --image input.jpg \
+        --use-offline-quant \
+        --model Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+        --model-quant-checkpoint /vllm-omni/wan22-t2v-modelopt-fp8\
+        --task t2v \
         --quantization fp8 \
         --prompts \
-            "Cherry blossoms swaying gently in the breeze" \
-        --height 480 --width 832 \
+            "A serene lakeside sunrise with mist over the water" \
+            "A cat walking across a wooden bridge in autumn" \
+        --height 720 --width 1280 \
         --num-frames 81 --num-inference-steps 40 --seed 42
+
+Video example (image-to-video) with offline quant:
+    python benchmarks/diffusion/quantization_quality.py \
+        --use-offline-quant \
+        --model Wan-AI/Wan2.2-I2V-A14B-Diffusers \
+        --model-quant-checkpoint /vllm-omni/wan22-i2v-modelopt-fp8\
+        --task i2v \
+        --quantization fp8 \
+        --prompts \
+            "An astronaut riding a horse across the surface of Mars, red dust swirling, cinematic wide shot." \
+            "A skateboarder doing a kickflip in an urban plaza, slow motion, golden hour lighting." \
+        --height 720 --width 1280 \
+        --image /path/to/ref_images/ \
+        --num-frames 81 --num-inference-steps 40 --seed 42 --vae-use-tiling
 
 Multiple quantization methods:
     python benchmarks/diffusion/quantization_quality.py \
@@ -65,7 +81,7 @@ import argparse
 import gc
 import time
 from pathlib import Path
-
+from typing import Any
 import numpy as np
 import torch
 
@@ -146,23 +162,67 @@ def _build_omni_kwargs(args, quantization=None):
         ring_degree=args.ring_degree,
         tensor_parallel_size=args.tensor_parallel_size,
     )
-    kwargs = {
-        "model": args.model,
-        "parallel_config": parallel_config,
-        "enforce_eager": args.enforce_eager,
-        "use_fp8_adaln_fusion": args.use_fp8_adaln_fusion,
-    }
     if quantization:
-        kwargs["quantization_config"] = quantization
+        kwargs = {
+            "model": args.model_quant_checkpoint if args.use_offline_quant else args.model,
+            "parallel_config": parallel_config,
+            "enforce_eager": args.enforce_eager,
+            "quantization_config":quantization,
+            "vae_use_tiling":args.vae_use_tiling,
+            "enable_diffusion_pipeline_profiler": True,
+            "use_fp8_adaln_fusion": args.use_fp8_adaln_fusion,
+        }
+    else:
+        # BF16 baseline never enables FP8 AdaLN fusion (FP8-weight-only kernel).
+        kwargs = {
+            "model": args.model,
+            "parallel_config": parallel_config,
+            "enforce_eager": args.enforce_eager,
+            "vae_use_tiling":args.vae_use_tiling,
+            "enable_diffusion_pipeline_profiler": True,
+        }
+
     return kwargs
+
+def _load_reference_images(spec: str | None) -> list[Any]:
+    """Load PIL.Image list from a directory or a single file path."""
+    if spec is None:
+        return []
+    from PIL import Image
+
+    p = Path(spec).expanduser()
+    if not p.exists():
+        raise SystemExit(f"--reference-images path not found: {p}")
+    if p.is_file():
+        return [Image.open(p).convert("RGB")]
+    image_paths = sorted(
+        f for f in p.iterdir() if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+    )
+    if not image_paths:
+        raise SystemExit(f"No image files (jpg/jpeg/png/webp) found in {p}")
+    return [Image.open(f).convert("RGB") for f in image_paths]
+
+def _extract_denoise_seconds(first) -> float | None:
+    """Pull denoise-only time out of OmniRequestOutput.stage_durations.
+
+    The pipeline profiler records keys like '<PipelineClass>.diffuse'
+    (cuda-synced timer wrapped around the denoising loop). Match by suffix so
+    this stays model-agnostic.
+    """
+    stage_durations = getattr(first, "stage_durations", {}) or {}
+    return next(
+        (v for k, v in stage_durations.items() if k.endswith(".diffuse")),
+        None,
+    )
 
 
 def _generate_image(omni, args, prompt, seed):
-    """Generate a single image and return (PIL.Image, time_seconds, memory_gib)."""
+    """Generate a single image and return (PIL.Image, wall_seconds, memory_gib, denoise_seconds)."""
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
     from vllm_omni.platforms import current_omni_platform
 
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(seed)
+    torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     outputs = omni.generate(
         {"prompt": prompt},
@@ -174,28 +234,27 @@ def _generate_image(omni, args, prompt, seed):
         ),
     )
     elapsed = time.perf_counter() - start
+    peak_mem = torch.cuda.max_memory_allocated() / (1024**3)
 
     first = outputs[0]
     peak_mem = getattr(first, "peak_memory_mb", 0.0) / 1024  # MB -> GiB
-    req_out = first.request_output[0] if hasattr(first, "request_output") else first
+    denoise_seconds = _extract_denoise_seconds(first)
+    req_out = first.request_output if hasattr(first, "request_output") else first
     img = req_out.images[0]
-    return img, elapsed, peak_mem
+    return img, elapsed, peak_mem, denoise_seconds
 
 
-def _generate_video(omni, args, prompt, seed, image=None):
-    """Generate a video and return (np.ndarray [F,H,W,C], time_seconds, memory_gib).
-
-    Pass ``image`` (PIL.Image) for i2v / ti2v tasks.
-    """
+def _generate_video(omni, args, prompt, seed,image=None):
+    """Generate a video and return (np.ndarray [F,H,W,C], wall_seconds, memory_gib, denoise_seconds)."""
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
     from vllm_omni.outputs import OmniRequestOutput
     from vllm_omni.platforms import current_omni_platform
 
-    request = {"prompt": prompt, "negative_prompt": ""}
+    request = {"prompt": prompt, "negative_prompt": args.negative_prompt}
     if image is not None:
         request["multi_modal_data"] = {"image": image}
-
     generator = torch.Generator(device=current_omni_platform.device_type).manual_seed(seed)
+    torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     outputs = omni.generate(
         request,
@@ -212,6 +271,7 @@ def _generate_video(omni, args, prompt, seed, image=None):
 
     first = outputs[0]
     peak_mem = getattr(first, "peak_memory_mb", 0.0) / 1024  # MB -> GiB
+    denoise_seconds = _extract_denoise_seconds(first)
     if hasattr(first, "request_output") and isinstance(first.request_output, list):
         inner = first.request_output[0]
         if isinstance(inner, OmniRequestOutput) and hasattr(inner, "images"):
@@ -222,9 +282,7 @@ def _generate_video(omni, args, prompt, seed, image=None):
         frames = first.images
     else:
         raise ValueError("Could not extract video frames from output.")
-    #print(f"Generated video frames type: {type(frames)}, shape: {getattr(frames, 'shape', 'N/A')}")
-    if isinstance(frames,list):
-        frames = frames[0]
+
     if isinstance(frames, torch.Tensor):
         video = frames.detach().cpu()
         if video.dim() == 5:
@@ -236,10 +294,12 @@ def _generate_video(omni, args, prompt, seed, image=None):
         frames_array = video.float().numpy()
     else:
         frames_array = np.asarray(frames)
+        if frames_array.ndim ==6:# wan2.2: inner.images = [ndarray[1,F,H,W,C]]
+            frames_array = frames_array[0]
         if frames_array.ndim == 5:
             frames_array = frames_array[0]
 
-    return frames_array, elapsed, peak_mem
+    return frames_array, elapsed, peak_mem, denoise_seconds
 
 
 def _unload_omni(omni):
@@ -258,17 +318,10 @@ def run_benchmark(args):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     is_video = args.task in ("t2v", "i2v", "ti2v")
-    is_image_conditioned = args.task in ("i2v", "ti2v")
+    is_image_conditioned = args.task == "i2v" or (args.task == "ti2v" and args.images is not None)
     prompts = args.prompts
     seed = args.seed
-
-    input_image = None
-    if is_image_conditioned:
-        if not args.image:
-            raise ValueError("--image is required for i2v and ti2v tasks.")
-        import PIL.Image
-        input_image = PIL.Image.open(args.image).convert("RGB")
-        input_image = input_image.resize((args.width, args.height), PIL.Image.Resampling.LANCZOS)
+    input_images = _load_reference_images(args.images) if is_image_conditioned else None
 
     # Determine configs to benchmark
     configs = []  # list of (label, quantization_method)
@@ -282,19 +335,23 @@ def run_benchmark(args):
     bl_kwargs = _build_omni_kwargs(args, quantization=None)
     omni_bl = Omni(**bl_kwargs)
 
-    baseline_outputs = {}  # prompt -> (output, time, mem)
-    for prompt in prompts:
+    baseline_outputs = {}  # prompt -> (output, wall_time, mem, denoise_seconds)
+    for i,prompt in enumerate(prompts):
         print(f"  Generating: {prompt[:60]}...")
-        if is_video:
-            out, t, mem = _generate_video(omni_bl, args, prompt, seed, image=input_image)
+        if is_video and input_images is not None:
+            out, t, mem, dt = _generate_video(omni_bl, args, prompt, seed,input_images[i % len(input_images)])
+        elif is_video:
+            out, t, mem, dt = _generate_video(omni_bl, args, prompt, seed)
         else:
-            out, t, mem = _generate_image(omni_bl, args, prompt, seed)
-        baseline_outputs[prompt] = (out, t, mem)
+            out, t, mem, dt = _generate_image(omni_bl, args, prompt, seed)
+        baseline_outputs[prompt] = (out, t, mem, dt)
 
     bl_avg_time = np.mean([v[1] for v in baseline_outputs.values()])
+    bl_denoise_times = [v[3] for v in baseline_outputs.values() if v[3] is not None]
+    bl_avg_denoise = float(np.mean(bl_denoise_times)) if bl_denoise_times else None
     bl_mem = baseline_outputs[prompts[0]][2]  # use first prompt's memory
     _unload_omni(omni_bl)
-    del omni_bl
+    del omni_bl # must explicitly del omni_bl otherwise will cause oom when running next model
 
     # Save baseline outputs
     bl_dir = output_dir / "baseline"
@@ -324,19 +381,22 @@ def run_benchmark(args):
         omni_qt = Omni(**qt_kwargs)
 
         qt_outputs = {}
-        for prompt in prompts:
+        for i,prompt in enumerate(prompts):
             print(f"  Generating: {prompt[:60]}...")
-            if is_video:
-                out, t, mem = _generate_video(omni_qt, args, prompt, seed, image=input_image)
+            if is_video and input_images is not None:
+                out, t, mem, dt = _generate_video(omni_qt, args, prompt, seed,input_images[i % len(input_images)])
+            elif is_video:
+                out, t, mem, dt = _generate_video(omni_qt, args, prompt, seed)
             else:
-                out, t, mem = _generate_image(omni_qt, args, prompt, seed)
-            qt_outputs[prompt] = (out, t, mem)
+                out, t, mem, dt = _generate_image(omni_qt, args, prompt, seed)
+            qt_outputs[prompt] = (out, t, mem, dt)
 
         qt_avg_time = np.mean([v[1] for v in qt_outputs.values()])
+        qt_denoise_times = [v[3] for v in qt_outputs.values() if v[3] is not None]
+        qt_avg_denoise = float(np.mean(qt_denoise_times)) if qt_denoise_times else None
         qt_mem = qt_outputs[prompts[0]][2]
         _unload_omni(omni_qt)
-        del omni_qt
-
+        del omni_qt  # must explicitly del omni_qt otherwise will cause oom when running next model
         # Save quantized outputs
         qt_dir = output_dir / config_label.replace(" ", "_")
         qt_dir.mkdir(parents=True, exist_ok=True)
@@ -363,12 +423,18 @@ def run_benchmark(args):
         mean_lpips = np.mean([p["lpips"] for p in per_prompt])
         speedup = bl_avg_time / qt_avg_time if qt_avg_time > 0 else float("inf")
         mem_reduction = (bl_mem - qt_mem) / bl_mem * 100
+        # Throughput uses denoise-only time (cuda-synced via DiffusionPipelineProfiler);
+        # falls back to wall time only if the profiler didn't surface it.
+        qt_throughput_basis = qt_avg_denoise if qt_avg_denoise is not None else qt_avg_time
+        qt_throughput = qt_throughput_basis / args.num_inference_steps if args.num_inference_steps > 0 else float("inf")
 
         all_results.append(
             {
                 "config": config_label,
                 "avg_time": qt_avg_time,
+                "avg_denoise": qt_avg_denoise,
                 "speedup": speedup,
+                "throughput_its": qt_throughput,
                 "memory_gib": qt_mem,
                 "mem_reduction_pct": mem_reduction,
                 "mean_lpips": mean_lpips,
@@ -383,8 +449,9 @@ def run_benchmark(args):
     print("=" * 80)
 
     # Summary table
+    model = args.model_quant_checkpoint if args.use_offline_quant else args.model
     lines = []
-    lines.append(f"## Quantization Quality Benchmark — {args.model.split('/')[-1]}")
+    lines.append(f"## Quantization Quality Benchmark — {model.split('/')[-1]}")
     lines.append(
         f"Setup: {args.height}x{args.width}, {args.num_inference_steps} steps, "
         f"seed={args.seed}, LPIPS ({args.lpips_net})"
@@ -394,17 +461,42 @@ def run_benchmark(args):
     lines.append("")
     lines.append("### Summary")
     lines.append("")
-    lines.append("| Config | Avg Time | Speedup | Memory (GiB) | Mem Reduction | Mean LPIPS |")
-    lines.append("|--------|----------|---------|--------------|---------------|------------|")
-    lines.append(f"| BF16 baseline | {bl_avg_time:.2f}s | 1.00x | {bl_mem:.2f} | — | (ref) |")
+    # Throughput uses denoise-only time (cuda-synced via DiffusionPipelineProfiler);
+    # falls back to wall time only if the profiler didn't surface it.
+    bl_throughput_basis = bl_avg_denoise if bl_avg_denoise is not None else bl_avg_time
+    bl_throughput = bl_throughput_basis / args.num_inference_steps if args.num_inference_steps > 0 else float("inf")
+    lines.append(
+        "| Config | Avg Time | Speedup | Throughput (s/it) "
+        "| Peak VRAM (GiB) | Peak VRAM Reduction | Mean LPIPS |"
+    )
+    lines.append(
+        "|--------|----------|---------|--------------------"
+        "|-----------------|---------------------|------------|"
+    )
+    lines.append(
+        f"| BF16 baseline | {bl_avg_time:.2f}s | 1.00x | {bl_throughput:.3f} "
+        f"| {bl_mem:.2f} | — | (ref) |"
+    )
     for r in all_results:
         lines.append(
             f"| {r['config']} | {r['avg_time']:.2f}s | {r['speedup']:.2f}x "
+            f"| {r['throughput_its']:.3f} "
             f"| {r['memory_gib']:.2f} | {r['mem_reduction_pct']:.0f}% "
             f"| {r['mean_lpips']:.4f} |"
         )
     lines.append("")
     lines.append("> LPIPS < 0.01 = imperceptible, > 0.1 = clearly noticeable.")
+    lines.append(
+        "> Throughput (s/it) = denoise time / num_inference_steps "
+        "(cuda-synced via DiffusionPipelineProfiler; excludes text encode + VAE decode)."
+    )
+    lines.append(
+        "> Peak VRAM = `max_memory_allocated` during one generate (model + activations + latents + VAE buffers)."
+    )
+    lines.append(
+        "> For model resident size on disk/VRAM, run `examples/quantization/check_modelopt_fp8_export.py "
+        "--output <ckpt> --baseline <hf-id-or-path>`."
+    )
     lines.append("")
 
     # Per-prompt table
@@ -445,16 +537,13 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--model", required=True, help="Model name or local path.")
+    parser.add_argument("--model-quant-checkpoint",default=None, help="Offline quantization model checkpoint")
+    parser.add_argument("--use-offline-quant",action="store_true",help="compare with offline quantized model checkpoint")
     parser.add_argument(
         "--task",
         default="t2i",
         choices=["t2i", "t2v", "i2v", "ti2v"],
         help="Task type: t2i (text-to-image), t2v (text-to-video), i2v / ti2v (image-to-video).",
-    )
-    parser.add_argument(
-        "--image",
-        default=None,
-        help="Path to input image (required for i2v and ti2v tasks).",
     )
     parser.add_argument(
         "--quantization",
@@ -468,6 +557,11 @@ def parse_args():
         default=["a cup of coffee on the table"],
         help="One or more prompts to generate.",
     )
+    parser.add_argument(
+        "--images",
+        default=None,
+        help="Path to input images (required for i2v and ti2v tasks).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
@@ -475,6 +569,13 @@ def parse_args():
     parser.add_argument("--num-frames", type=int, default=81, help="Number of video frames (t2v only).")
     parser.add_argument("--fps", type=int, default=24, help="Video FPS for saving (t2v only).")
     parser.add_argument("--guidance-scale", type=float, default=4.0, help="CFG scale (used for video).")
+    parser.add_argument(
+        "--negative-prompt",
+        type=str,
+        default="",
+        help="Negative prompt for video generation. Wan2.2 I2V degenerates to a static frame "
+             "without the official anti-static negative prompt; other pipelines work with empty.",
+    )
     parser.add_argument("--output-dir", type=str, default="./quant_bench_output", help="Directory to save outputs.")
     parser.add_argument(
         "--lpips-net",
@@ -488,11 +589,21 @@ def parse_args():
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument(
+        "--vae-use-tiling",
+        action="store_true",
+        help="Enable VAE tiling for memory optimization.Specifically for bf16 model",
+    )
+    parser.add_argument(
         "--use-fp8-adaln-fusion",
         action="store_true",
-        help="Enable FP8 AdaLN fusion for adalayernorm or layernorm fusion.",
+        help="Enable FP8 AdaLN fusion kernel for adalayernorm/layernorm. FP8-only.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.task in ("i2v") and args.images is None:
+        parser.error(f"--task {args.task} requires --images")
+    if args.use_offline_quant and not args.model_quant_checkpoint:
+        parser.error("--use-offline-quant requires --model-quant-checkpoint")
+    return args
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import subprocess
 import time
 import os
 
-ssh_key_path = os.path.expanduser("~/.ssh/id_rsa.pub")
+ssh_key_path = os.path.expanduser("~/.ssh/id_ed25519.pub")
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04", add_python="3.12")
@@ -34,7 +34,10 @@ image = (
     .run_commands("curl -LsSf https://astral.sh/uv/install.sh | sh")
     .env({"PATH": "/root/.local/bin:$PATH"})
     .run_commands("uv pip install --system vllm==0.19.0 --torch-backend cu130")
-    .run_commands("git clone https://github.com/ArtificialRay/vllm-omni.git /vllm-omni")
+    .run_commands(
+        "git clone https://github.com/ArtificialRay/vllm-omni.git /vllm-omni",
+        "cd /vllm-omni && git checkout eval-fp8-quant-and-adaln",
+    )
     .run_commands("cd /vllm-omni && uv pip install --system -e '.[dev]'")
     .run_commands(
         "uv pip uninstall --system opencv-python || true",
@@ -60,7 +63,7 @@ def wait_for_port(host, port, q):
     q.put((host, port))
 
 
-@app.function(gpu="H100", timeout=3600 * 24)
+@app.function(gpu="H100:2", timeout=3600 * 24)
 def launch_ssh(q):
     with modal.forward(22, unencrypted=True) as tunnel:
         host, port = tunnel.tcp_socket
